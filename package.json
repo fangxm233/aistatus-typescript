@@ -1,0 +1,62 @@
+{
+  "name": "aistatus",
+  "version": "0.0.2",
+  "description": "Status-aware LLM routing for more reliable agents and coding CLIs.",
+  "type": "module",
+  "license": "MIT",
+  "author": "LeTau Robotics <hello@aistatus.cc>",
+  "homepage": "https://aistatus.cc",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fangxm233/aistatus-typescript.git"
+  },
+  "bugs": {
+    "url": "https://github.com/fangxm233/aistatus-typescript/issues"
+  },
+  "keywords": [
+    "ai",
+    "llm",
+    "routing",
+    "fallback",
+    "openai",
+    "anthropic",
+    "gemini",
+    "typescript",
+    "sdk"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": [
+    "./src/providers/*.ts"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "check": "tsc --noEmit",
+    "test": "npm run build && node --test tests/status-api.test.mjs tests/router.test.mjs",
+    "prepublishOnly": "npm run check && npm run test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.1",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3"
+  }
+}
