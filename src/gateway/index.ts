@@ -6,8 +6,13 @@
  *   startGateway({ port: 9880 });
  */
 
+// input: CLI/startup options and gateway config loading helpers
+// output: gateway server exports plus startGateway() bootstrap helper for consumers
+// pos: public gateway module surface that re-exports config/server types and starts the HTTP gateway
+// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
+
 export { GatewayServer } from "./server.js";
-export { loadConfig, autoDiscover, generateConfig } from "./config.js";
+export { loadConfig, autoDiscover, generateConfig, fromDict } from "./config.js";
 export type { GatewayConfig, EndpointConfig, FallbackConfig } from "./config.js";
 export { HealthTracker } from "./health.js";
 export {

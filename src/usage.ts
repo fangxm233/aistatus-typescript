@@ -3,6 +3,11 @@
  * Records API usage per request and provides summary/grouping.
  */
 
+// input: per-request usage payloads from gateway/router code and optional filesystem base dir
+// output: persisted JSONL usage records plus aggregate summaries/groupings for reporting APIs
+// pos: shared usage storage/tracking layer used by the gateway /usage endpoint and SDK usage reporting
+// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
+
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -144,6 +149,7 @@ export class UsageTracker {
     latency_ms: number;
     fallback: boolean;
     cost?: number;
+    billing_mode?: string;
   }): Record<string, unknown> {
     const record: Record<string, unknown> = {
       ts: new Date().toISOString(),
@@ -154,6 +160,7 @@ export class UsageTracker {
       cost: round8(opts.cost ?? 0),
       fallback: opts.fallback,
       latency_ms: opts.latency_ms,
+      billing_mode: opts.billing_mode,
     };
     this.storage.append(record);
     return record;

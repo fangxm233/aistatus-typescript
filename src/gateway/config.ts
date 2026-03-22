@@ -3,6 +3,11 @@
  * Compatible with Python SDK gateway.yaml format.
  */
 
+// input: gateway.yaml objects or env vars discovered at runtime
+// output: GatewayConfig objects with active endpoints plus mode-indexed endpoint maps
+// pos: parses gateway configuration for the HTTP server, including backward-compatible flat configs and nested mode-aware configs
+// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
+
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -76,7 +81,9 @@ export interface GatewayConfig {
   host: string;
   port: number;
   status_check: boolean;
+  mode: string;
   endpoints: Record<string, EndpointConfig>;
+  endpoint_modes: Record<string, Record<string, EndpointConfig>>;
 }
 
 function resolveSingle(val: string): string {
@@ -120,49 +127,84 @@ function parseModelFallbacks(raw: unknown): Record<string, string[]> {
   return parsed;
 }
 
-function fromDict(raw: Record<string, unknown>): GatewayConfig {
+function parseEndpointConfig(epName: string, epRaw: Record<string, unknown>): EndpointConfig {
+  const keys = resolveKeys((epRaw.keys as unknown[]) ?? []);
+  const auth_style = (epRaw.auth_style as string) ?? (epName in AUTH_STYLES ? epName : "bearer");
+  const base_url = (epRaw.base_url as string) ?? DEFAULT_BASE_URLS[epName] ?? "";
+
+  const fallbacks: FallbackConfig[] = [];
+  for (const fb of (epRaw.fallbacks as Record<string, unknown>[]) ?? []) {
+    const fbKey = resolveSingle((fb.key as string) ?? (fb.api_key as string) ?? "");
+    fallbacks.push({
+      name: (fb.name as string) ?? "fallback",
+      base_url: fb.base_url as string,
+      api_key: fbKey,
+      auth_style: (fb.auth_style as string) ?? "bearer",
+      model_prefix: (fb.model_prefix as string) ?? "",
+      model_map: (fb.model_map as Record<string, string>) ?? {},
+      translate: (fb.translate as string) ?? null,
+    });
+  }
+
+  const passthrough = epRaw.passthrough !== false;
+  const model_fallbacks = parseModelFallbacks(epRaw.model_fallbacks);
+
+  return {
+    name: epName,
+    base_url,
+    auth_style,
+    keys,
+    passthrough,
+    fallbacks,
+    model_fallbacks,
+  };
+}
+
+function isFlatEndpointConfig(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value as Record<string, unknown>);
+  return keys.some(key => ["keys", "base_url", "auth_style", "passthrough", "fallbacks", "model_fallbacks"].includes(key));
+}
+
+export function fromDict(raw: Record<string, unknown>): GatewayConfig {
   const host = (raw.host as string) ?? "127.0.0.1";
   const port = (raw.port as number) ?? 9880;
   const status_check = raw.status_check !== false;
 
-  const endpoints: Record<string, EndpointConfig> = {};
+  const endpoint_modes: Record<string, Record<string, EndpointConfig>> = {};
+  const discoveredModes: string[] = [];
+
   for (const epName of ["anthropic", "openai", "google"]) {
     const epRaw = raw[epName] as Record<string, unknown> | undefined;
     if (!epRaw) continue;
 
-    const keys = resolveKeys((epRaw.keys as unknown[]) ?? []);
-    const auth_style = (epRaw.auth_style as string) ?? (epName in AUTH_STYLES ? epName : "bearer");
-    const base_url = (epRaw.base_url as string) ?? DEFAULT_BASE_URLS[epName] ?? "";
-
-    const fallbacks: FallbackConfig[] = [];
-    for (const fb of (epRaw.fallbacks as Record<string, unknown>[]) ?? []) {
-      const fbKey = resolveSingle((fb.key as string) ?? (fb.api_key as string) ?? "");
-      fallbacks.push({
-        name: (fb.name as string) ?? "fallback",
-        base_url: fb.base_url as string,
-        api_key: fbKey,
-        auth_style: (fb.auth_style as string) ?? "bearer",
-        model_prefix: (fb.model_prefix as string) ?? "",
-        model_map: (fb.model_map as Record<string, string>) ?? {},
-        translate: (fb.translate as string) ?? null,
-      });
+    if (isFlatEndpointConfig(epRaw)) {
+      endpoint_modes.default ??= {};
+      endpoint_modes.default[epName] = parseEndpointConfig(epName, epRaw);
+      continue;
     }
 
-    const passthrough = epRaw.passthrough !== false;
-    const model_fallbacks = parseModelFallbacks(epRaw.model_fallbacks);
-
-    endpoints[epName] = {
-      name: epName,
-      base_url,
-      auth_style,
-      keys,
-      passthrough,
-      fallbacks,
-      model_fallbacks,
-    };
+    for (const [modeName, modeRaw] of Object.entries(epRaw)) {
+      if (!modeRaw || typeof modeRaw !== "object" || Array.isArray(modeRaw)) continue;
+      endpoint_modes[modeName] ??= {};
+      endpoint_modes[modeName][epName] = parseEndpointConfig(epName, modeRaw as Record<string, unknown>);
+      if (!discoveredModes.includes(modeName)) discoveredModes.push(modeName);
+    }
   }
 
-  return { host, port, status_check, endpoints };
+  const availableModes = Object.keys(endpoint_modes);
+  const mode = (raw.mode as string) ?? discoveredModes[0] ?? availableModes[0] ?? "default";
+  const activeMode = endpoint_modes[mode] ? mode : (availableModes[0] ?? "default");
+  endpoint_modes[activeMode] ??= {};
+
+  return {
+    host,
+    port,
+    status_check,
+    mode: activeMode,
+    endpoints: endpoint_modes[activeMode],
+    endpoint_modes,
+  };
 }
 
 export function autoDiscover(host = "127.0.0.1", port = 9880): GatewayConfig {
@@ -203,7 +245,14 @@ export function autoDiscover(host = "127.0.0.1", port = 9880): GatewayConfig {
     }
   }
 
-  return { host, port, status_check: true, endpoints };
+  return {
+    host,
+    port,
+    status_check: true,
+    mode: "default",
+    endpoints,
+    endpoint_modes: { default: endpoints },
+  };
 }
 
 export function loadConfig(configPath?: string): GatewayConfig {

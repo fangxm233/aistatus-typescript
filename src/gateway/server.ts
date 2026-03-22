@@ -3,6 +3,11 @@
  * Uses Node.js native http.createServer (no express dependency).
  */
 
+// input: GatewayConfig, inbound HTTP requests, upstream provider responses, and usage tracker storage
+// output: gateway HTTP responses, mode/status/usage endpoints, and persisted per-request usage records
+// pos: core gateway runtime that routes requests across configured endpoints and exposes operational APIs
+// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
+
 import * as http from "node:http";
 import * as url from "node:url";
 
@@ -44,6 +49,16 @@ export class GatewayServer {
   private _server: http.Server | null = null;
 
   constructor(config: GatewayConfig, pidFile?: string) {
+    if (!(config as Partial<GatewayConfig>).endpoint_modes) {
+      config.endpoint_modes = { [config.mode ?? "default"]: config.endpoints };
+    }
+    if (!config.mode) {
+      config.mode = Object.keys(config.endpoint_modes)[0] ?? "default";
+    }
+    if (!config.endpoints) {
+      config.endpoints = config.endpoint_modes[config.mode] ?? {};
+    }
+
     this.config = config;
     this.health = new HealthTracker();
     this.usage = new UsageTracker();
@@ -106,6 +121,9 @@ export class GatewayServer {
     }
     if (pathname === "/usage" && req.method === "GET") {
       return this._handleUsage(parsedUrl.query as Record<string, string>, res);
+    }
+    if (pathname === "/mode" && req.method === "POST") {
+      return this._handleModeSwitch(req, res);
     }
 
     // Proxy: /{endpoint}/{path...}
@@ -490,6 +508,7 @@ export class GatewayServer {
       output_tokens: outputTokens,
       latency_ms: elapsedMs,
       fallback: backend.id.includes(":fb:"),
+      billing_mode: this.config.mode,
     });
   }
 
@@ -500,6 +519,7 @@ export class GatewayServer {
   private _handleHealth(res: http.ServerResponse): void {
     jsonResponse(res, 200, {
       status: "ok",
+      mode: this.config.mode,
       endpoints: Object.keys(this.config.endpoints),
     });
   }
@@ -539,13 +559,55 @@ export class GatewayServer {
     delete healthSummary.model_health;
 
     jsonResponse(res, 200, {
+      mode: this.config.mode,
+      available_modes: Object.keys(this.config.endpoint_modes),
       endpoints: info,
       health_detail: healthSummary,
       model_health: modelHealth ?? {},
     });
   }
 
+  private async _handleModeSwitch(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const body = await readBody(req);
+    let payload: Record<string, unknown>;
+    try {
+      payload = body.length > 0 ? JSON.parse(body.toString("utf-8")) : {};
+    } catch {
+      return jsonResponse(res, 400, {
+        error: { message: "Invalid JSON body", type: "gateway_error" },
+      });
+    }
+
+    const mode = typeof payload.mode === "string" ? payload.mode : "";
+    if (!mode || !this.config.endpoint_modes[mode]) {
+      return jsonResponse(res, 400, {
+        error: { message: `Unknown mode: ${mode}`, type: "gateway_error" },
+      });
+    }
+
+    const previous = this.config.mode;
+    this.config.mode = mode;
+    this.config.endpoints = this.config.endpoint_modes[mode];
+    console.log(`[gateway] Switched mode ${previous} -> ${mode}`);
+    return jsonResponse(res, 200, { ok: true, mode, previous });
+  }
+
   private _handleUsage(query: Record<string, string>, res: http.ServerResponse): void {
+    if (query.format === "records") {
+      const records = this.usage.storage.read("all");
+      let filtered = records;
+      if (query.since) {
+        const sinceDate = new Date(query.since);
+        if (!isNaN(sinceDate.getTime())) {
+          filtered = records.filter(record => {
+            const ts = new Date(record.ts as string);
+            return !isNaN(ts.getTime()) && ts > sinceDate;
+          });
+        }
+      }
+      return jsonResponse(res, 200, { records: filtered });
+    }
+
     const period = query.period ?? "today";
     const groupBy = query.group_by ?? "";
 

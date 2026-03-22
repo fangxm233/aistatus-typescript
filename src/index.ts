@@ -1,3 +1,8 @@
+// input: provider adapter registrations plus route/status/usage/pricing modules from the SDK runtime
+// output: public aistatus SDK exports, default router helpers, and version constant for consumers
+// pos: root SDK module that wires provider registrations and exposes the package's main API surface
+// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
+
 import "./providers/openai";
 import "./providers/openrouter";
 import "./providers/anthropic";
@@ -35,7 +40,7 @@ export { ProviderAdapter, createAdapter, registerAdapterType } from "./providers
 export { UsageTracker, UsageStorage } from "./usage";
 export { CostCalculator } from "./pricing";
 
-export const VERSION = "0.0.2";
+export const VERSION = "0.0.3";
 
 let defaultRouter: Router | null = null;
 

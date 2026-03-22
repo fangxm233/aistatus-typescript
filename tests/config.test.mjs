@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-// Config tests: test autoDiscover and generateConfig
-// (loadConfig with YAML requires a file, so we test autoDiscover which is pure logic)
+// input: built gateway config exports from dist and temporary environment variables
+// output: regression tests for autoDiscover, generateConfig, and mode-aware fromDict parsing
+// pos: gateway config compatibility tests covering flat legacy config and nested mode config parsing
+// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
+
+// Config tests: test autoDiscover, fromDict mode parsing, and generateConfig
 
 test("autoDiscover creates endpoints from env vars", async () => {
   // Save and set env
@@ -64,6 +68,73 @@ test("autoDiscover adds OpenRouter fallbacks when OPENROUTER_API_KEY is set", as
       else process.env[k] = v;
     }
   }
+});
+
+test("fromDict parses nested mode-aware endpoint config", async () => {
+  const { fromDict } = await import("../dist/gateway/index.js");
+
+  const config = fromDict({
+    mode: "api",
+    anthropic: {
+      api: {
+        base_url: "https://right.codes/o2a",
+        auth_style: "anthropic",
+        passthrough: true,
+        keys: ["sk-api"],
+      },
+      plan: {
+        base_url: "https://api.anthropic.com",
+        auth_style: "bearer",
+        passthrough: true,
+      },
+    },
+  });
+
+  assert.equal(config.mode, "api");
+  assert.deepEqual(Object.keys(config.endpoint_modes).sort(), ["api", "plan"]);
+  assert.equal(config.endpoints.anthropic.base_url, "https://right.codes/o2a");
+  assert.equal(config.endpoint_modes.api.anthropic.keys[0], "sk-api");
+  assert.equal(config.endpoint_modes.plan.anthropic.base_url, "https://api.anthropic.com");
+});
+
+test("fromDict keeps flat config backward compatible", async () => {
+  const { fromDict } = await import("../dist/gateway/index.js");
+
+  const config = fromDict({
+    openai: {
+      base_url: "https://api.openai.com",
+      auth_style: "openai",
+      keys: ["sk-test"],
+      passthrough: false,
+    },
+  });
+
+  assert.equal(config.mode, "default");
+  assert.deepEqual(Object.keys(config.endpoint_modes), ["default"]);
+  assert.equal(config.endpoints.openai.base_url, "https://api.openai.com");
+  assert.equal(config.endpoint_modes.default.openai.keys[0], "sk-test");
+});
+
+test("fromDict defaults nested mode to first discovered mode when top-level mode missing", async () => {
+  const { fromDict } = await import("../dist/gateway/index.js");
+
+  const config = fromDict({
+    anthropic: {
+      plan: {
+        base_url: "https://api.anthropic.com",
+        auth_style: "bearer",
+      },
+      api: {
+        base_url: "https://right.codes/o2a",
+        auth_style: "anthropic",
+        keys: ["sk-api"],
+      },
+    },
+  });
+
+  assert.equal(config.mode, "plan");
+  assert.equal(config.endpoints.anthropic.base_url, "https://api.anthropic.com");
+  assert.deepEqual(Object.keys(config.endpoint_modes).sort(), ["api", "plan"]);
 });
 
 test("generateConfig returns a non-empty YAML string", async () => {
