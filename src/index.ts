@@ -32,6 +32,8 @@ export {
 } from "./models";
 export { Router, type RouterOptions } from "./router";
 export { ProviderAdapter, createAdapter, registerAdapterType } from "./providers/base";
+export { UsageTracker, UsageStorage } from "./usage";
+export { CostCalculator } from "./pricing";
 
 export const VERSION = "0.0.2";
 

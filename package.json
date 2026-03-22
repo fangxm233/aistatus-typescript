@@ -33,11 +33,19 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "aistatus-gateway": "./dist/gateway-cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./gateway": {
+      "types": "./dist/gateway/index.d.ts",
+      "import": "./dist/gateway/index.js",
+      "require": "./dist/gateway/index.cjs"
     }
   },
   "publishConfig": {
@@ -49,14 +57,17 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "build": "tsup src/index.ts src/gateway/index.ts src/gateway-cli.ts --format esm,cjs --dts --clean",
     "check": "tsc --noEmit",
-    "test": "npm run build && node --test tests/status-api.test.mjs tests/router.test.mjs",
+    "test": "npm run build && node --test tests/status-api.test.mjs tests/router.test.mjs tests/health.test.mjs tests/config.test.mjs tests/translate.test.mjs tests/usage.test.mjs tests/pricing.test.mjs tests/server.test.mjs",
     "prepublishOnly": "npm run check && npm run test"
   },
   "devDependencies": {
     "@types/node": "^24.6.1",
     "tsup": "^8.5.0",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "yaml": "^2.8.3"
   }
 }
