@@ -318,6 +318,196 @@ Common failure modes:
 - `ProviderNotConfigured`: the required API key or explicit provider config is missing
 - `ProviderCallFailed`: the selected provider failed and fallback was disabled
 
+## Gateway
+
+The gateway is a local HTTP proxy that sits between your application and
+provider APIs. It adds multi-key rotation, automatic failover across providers,
+per-model health tracking, protocol translation, and usage recording — all
+transparent to the calling application.
+
+### Quick Start
+
+The fastest way to start is auto-discovery, which reads your environment
+variables and sets up endpoints automatically:
+
+```bash
+npx aistatus-gateway start --auto
+```
+
+Then point your tools at the gateway:
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:9880/anthropic
+export OPENAI_BASE_URL=http://localhost:9880/openai/v1
+```
+
+### Configuration
+
+Create `~/.aistatus/gateway.yaml` for full control. Generate an example:
+
+```bash
+npx aistatus-gateway init
+```
+
+A typical configuration:
+
+```yaml
+port: 9880
+
+anthropic:
+  keys:
+    - $ANTHROPIC_API_KEY
+  fallbacks:
+    - name: openrouter
+      base_url: https://openrouter.ai/api/v1
+      key: $OPENROUTER_API_KEY
+      model_prefix: "anthropic/"
+      translate: anthropic-to-openai
+  model_fallbacks:
+    claude-opus-4-6:
+      - claude-sonnet-4-6
+      - claude-haiku-4-5
+
+openai:
+  keys:
+    - $OPENAI_API_KEY
+  fallbacks:
+    - name: openrouter
+      base_url: https://openrouter.ai/api/v1
+      key: $OPENROUTER_API_KEY
+      model_prefix: "openai/"
+```
+
+Environment variable references (`$VAR_NAME`) are resolved at load time.
+
+### How the Gateway Routes Requests
+
+When a request arrives at `/{endpoint}/{path}`:
+
+1. **Managed keys** — tries configured API keys in round-robin order
+2. **Passthrough** — if hybrid mode is enabled (default), tries the caller's own
+   API key
+3. **Fallbacks** — tries secondary providers in order
+
+If a backend returns a retryable error (429, 500, 502, 503, 529), the gateway
+marks it unhealthy with a cooldown and tries the next backend. A successful
+request clears the cooldown.
+
+### Model Fallbacks
+
+Model-level fallback chains let the gateway downgrade gracefully when a specific
+model is degraded:
+
+```yaml
+anthropic:
+  keys: [$ANTHROPIC_API_KEY]
+  model_fallbacks:
+    claude-opus-4-6: [claude-sonnet-4-6, claude-haiku-4-5]
+```
+
+When `claude-opus-4-6` is unhealthy, the gateway substitutes the first healthy
+candidate. The response includes an `x-gateway-model-fallback` header showing
+what happened.
+
+### Protocol Translation
+
+The gateway can translate between Anthropic and OpenAI formats automatically.
+This lets you route Anthropic API calls to OpenAI-compatible backends like
+OpenRouter:
+
+```yaml
+anthropic:
+  fallbacks:
+    - name: openrouter
+      base_url: https://openrouter.ai/api/v1
+      key: $OPENROUTER_API_KEY
+      translate: anthropic-to-openai
+```
+
+Translation covers request format, response format, and streaming SSE events.
+
+### Configuration Modes
+
+Modes let you maintain multiple configurations and switch at runtime:
+
+```yaml
+mode: production
+
+anthropic:
+  production:
+    keys: [$ANTHROPIC_PROD_KEY]
+    passthrough: false
+  development:
+    keys: [$ANTHROPIC_DEV_KEY]
+    passthrough: true
+```
+
+Switch the active mode at runtime:
+
+```bash
+curl -X POST http://localhost:9880/mode -d '{"mode": "development"}'
+```
+
+Or use per-request mode override without changing the global mode:
+
+```
+GET /m/development/anthropic/v1/messages
+```
+
+### Health Tracking
+
+The gateway tracks health at both backend and model level using a sliding
+60-second error window. After 5 errors in that window, a backend or model is
+marked unhealthy with a status-code-specific cooldown (e.g. 30 seconds for 429,
+15 seconds for 500). At startup, the gateway can pre-check model health via
+`aistatus.cc` and pre-mark degraded models.
+
+### Gateway Authentication
+
+Protect the gateway from unauthorized access (separate from provider API keys):
+
+```yaml
+auth:
+  enabled: true
+  keys: [$GATEWAY_API_KEY]
+  public_paths: [/health]
+```
+
+### Management Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Quick health check (always public) |
+| `/status` | GET | Detailed backend and model health |
+| `/usage`  | GET | Usage tracking with cost breakdown |
+| `/mode`   | POST | Switch active configuration mode |
+
+The `/usage` endpoint supports `?period=today|week|month|all` and
+`?group_by=model|provider`.
+
+### CLI Reference
+
+```bash
+npx aistatus-gateway start [--config PATH] [--host HOST] [-p PORT] [--auto] [--pid-file PATH]
+npx aistatus-gateway init [-o PATH]
+```
+
+### Programmatic Usage
+
+```ts
+import { startGateway } from "aistatus/gateway";
+
+await startGateway({ port: 9880, auto: true });
+```
+
+Or with a config file:
+
+```ts
+import { startGateway } from "aistatus/gateway";
+
+await startGateway({ configPath: "./gateway.yaml" });
+```
+
 ## Environment Variables
 
 The router auto-discovers providers from standard environment variables:
