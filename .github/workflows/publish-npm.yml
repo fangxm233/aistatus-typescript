@@ -13,6 +13,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: typescript
 
     steps:
       - name: Checkout
@@ -30,3 +31,5 @@ jobs:
 
       - name: Publish package
         run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
