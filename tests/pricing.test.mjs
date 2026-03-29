@@ -45,3 +45,92 @@ test("CostCalculator.calculateCost handles partial pricing", async () => {
   // Only input: 1M/1M * 2 = 2.0
   assert.equal(cost, 2);
 });
+
+test("CostCalculator.calculateCostWithCache uses fetched cache prices", async () => {
+  const { CostCalculator } = await import("../dist/index.js");
+
+  const calc = new CostCalculator();
+  calc.getPricing = () => ({
+    input_per_million: 3.0,   // $3/M input
+    output_per_million: 15.0, // $15/M output
+    input_cache_read_per_million: 0.3,  // $0.30/M (0.10x input)
+    input_cache_write_per_million: 3.75, // $3.75/M (1.25x input)
+  });
+
+  const cost = calc.calculateCostWithCache(
+    "anthropic", "claude-sonnet-4-6",
+    1000,    // input tokens
+    500,     // output tokens
+    2000,    // cache creation tokens
+    5000,    // cache read tokens
+  );
+
+  // input: 1000/1M * 3 = 0.003
+  // output: 500/1M * 15 = 0.0075
+  // cache_write: 2000/1M * 3.75 = 0.0075
+  // cache_read: 5000/1M * 0.3 = 0.0015
+  // total = 0.003 + 0.0075 + 0.0075 + 0.0015 = 0.0195
+  assert.equal(cost, 0.0195);
+});
+
+test("CostCalculator.calculateCostWithCache uses different cache prices per provider", async () => {
+  const { CostCalculator } = await import("../dist/index.js");
+
+  const calc = new CostCalculator();
+  // Google-style pricing: cache read 0.10x, cache write 0.30x (not 1.25x like Anthropic)
+  calc.getPricing = () => ({
+    input_per_million: 1.25,
+    output_per_million: 5.0,
+    input_cache_read_per_million: 0.125,  // 0.10x
+    input_cache_write_per_million: 0.375, // 0.30x (Google's rate)
+  });
+
+  const cost = calc.calculateCostWithCache(
+    "google", "gemini-2.5-pro",
+    1000, 500, 2000, 5000,
+  );
+
+  // input: 1000/1M * 1.25 = 0.00125
+  // output: 500/1M * 5.0 = 0.0025
+  // cache_write: 2000/1M * 0.375 = 0.00075
+  // cache_read: 5000/1M * 0.125 = 0.000625
+  // total = 0.00125 + 0.0025 + 0.00075 + 0.000625 = 0.005125
+  assert.equal(cost, 0.005125);
+});
+
+test("CostCalculator.calculateCostWithCache falls back to multipliers when cache prices missing", async () => {
+  const { CostCalculator } = await import("../dist/index.js");
+
+  const calc = new CostCalculator();
+  calc.getPricing = () => ({
+    input_per_million: 3.0,
+    output_per_million: 15.0,
+    input_cache_read_per_million: null,
+    input_cache_write_per_million: null,
+  });
+
+  const cost = calc.calculateCostWithCache(
+    "anthropic", "claude-sonnet-4-6",
+    1000, 500, 2000, 5000,
+  );
+
+  // Fallback: cache_write = 1.25x input, cache_read = 0.10x input
+  // Same result as before: 0.0195
+  assert.equal(cost, 0.0195);
+});
+
+test("CostCalculator.calculateCostWithCache equals calculateCost when no cache tokens", async () => {
+  const { CostCalculator } = await import("../dist/index.js");
+
+  const calc = new CostCalculator();
+  calc.getPricing = () => ({
+    input_per_million: 3.0,
+    output_per_million: 15.0,
+    input_cache_read_per_million: 0.3,
+    input_cache_write_per_million: 3.75,
+  });
+
+  const withCache = calc.calculateCostWithCache("a", "m", 1000, 500, 0, 0);
+  const withoutCache = calc.calculateCost("a", "m", 1000, 500);
+  assert.equal(withCache, withoutCache);
+});

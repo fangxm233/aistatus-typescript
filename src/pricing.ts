@@ -5,6 +5,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { execFileSync } from "node:child_process";
 
 const BASE_URL = "https://aistatus.cc";
 const CACHE_TTL_SECONDS = 3600;
@@ -12,6 +13,8 @@ const CACHE_TTL_SECONDS = 3600;
 interface PricingInfo {
   input_per_million: number | null;
   output_per_million: number | null;
+  input_cache_read_per_million: number | null;
+  input_cache_write_per_million: number | null;
 }
 
 interface CacheEntry {
@@ -41,6 +44,36 @@ export class CostCalculator {
     let cost = 0;
     if (input_per_million != null) {
       cost += (Math.max(inputTokens, 0) / 1_000_000) * input_per_million;
+    }
+    if (output_per_million != null) {
+      cost += (Math.max(outputTokens, 0) / 1_000_000) * output_per_million;
+    }
+    return Math.round(cost * 1e8) / 1e8;
+  }
+
+  calculateCostWithCache(
+    provider: string,
+    model: string,
+    inputTokens: number,
+    outputTokens: number,
+    cacheCreationInputTokens: number,
+    cacheReadInputTokens: number,
+  ): number {
+    const pricing = this.getPricing(provider, model);
+    if (!pricing) return 0;
+
+    const { input_per_million, output_per_million, input_cache_read_per_million, input_cache_write_per_million } = pricing;
+    if (input_per_million == null && output_per_million == null) return 0;
+
+    let cost = 0;
+    if (input_per_million != null) {
+      cost += (Math.max(inputTokens, 0) / 1_000_000) * input_per_million;
+      // Cache creation: use fetched price, fallback to 1.25x input price
+      const cacheWritePrice = input_cache_write_per_million ?? (input_per_million * 1.25);
+      cost += (Math.max(cacheCreationInputTokens, 0) / 1_000_000) * cacheWritePrice;
+      // Cache read: use fetched price, fallback to 0.10x input price
+      const cacheReadPrice = input_cache_read_per_million ?? (input_per_million * 0.10);
+      cost += (Math.max(cacheReadInputTokens, 0) / 1_000_000) * cacheReadPrice;
     }
     if (output_per_million != null) {
       cost += (Math.max(outputTokens, 0) / 1_000_000) * output_per_million;
@@ -85,9 +118,8 @@ export class CostCalculator {
 
     for (const query of queries) {
       try {
-        // Synchronous fetch using child_process for compatibility
+        // Synchronous fetch using child_process
         const url = `${this._baseUrl}/api/models?q=${encodeURIComponent(query)}`;
-        const { execFileSync } = require("node:child_process");
         const result = execFileSync("node", [
           "-e",
           `fetch(${JSON.stringify(url)},{signal:AbortSignal.timeout(3000)}).then(r=>r.json()).then(d=>process.stdout.write(JSON.stringify(d))).catch(()=>process.stdout.write("{}"))`,
@@ -108,9 +140,14 @@ export class CostCalculator {
     const completion = toFloat(pricing.completion);
     if (prompt == null && completion == null) return null;
 
+    const cacheRead = toFloat(pricing.input_cache_read);
+    const cacheWrite = toFloat(pricing.input_cache_write);
+
     return {
       input_per_million: prompt == null ? null : prompt * 1_000_000,
       output_per_million: completion == null ? null : completion * 1_000_000,
+      input_cache_read_per_million: cacheRead == null ? null : cacheRead * 1_000_000,
+      input_cache_write_per_million: cacheWrite == null ? null : cacheWrite * 1_000_000,
     };
   }
 

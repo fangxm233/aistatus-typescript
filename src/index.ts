@@ -27,18 +27,28 @@ export {
   Status,
   type Alternative,
   type ChatMessage,
+  type ContentBlock,
+  type ImageBase64Block,
+  type ImageUrlBlock,
   type MessageRole,
   type ModelInfo,
   type ProviderCallOptions,
   type ProviderConfig,
   type ProviderStatus,
+  type ResponseFormat,
   type RouteConfig,
   type RouteOptions,
+  type RouteResponseInit,
+  type StreamChunk,
+  type TextBlock,
 } from "./models";
-export { Router, type RouterOptions } from "./router";
+export { Router, type RouterOptions, type StreamCallbacks } from "./router";
+export { streamToReadable } from "./stream";
 export { ProviderAdapter, createAdapter, registerAdapterType } from "./providers/base";
+export { extractTextFromContent, normalizeContent } from "./content";
 export { UsageTracker, UsageStorage } from "./usage";
 export { CostCalculator } from "./pricing";
+export type { Middleware, BeforeRequestContext, AfterResponseContext } from "./middleware";
 
 export const VERSION = "0.0.3";
 

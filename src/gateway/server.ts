@@ -16,9 +16,11 @@ import {
   type GatewayConfig,
   AUTH_STYLES,
 } from "./config.js";
+import { checkGatewayAuth } from "./auth.js";
 import { HealthTracker } from "./health.js";
 import { anthropicRequestToOpenai, openaiResponseToAnthropic, openaiSseToAnthropicSse } from "./translate.js";
 import { UsageTracker } from "../usage.js";
+import { CostCalculator } from "../pricing.js";
 
 interface Backend {
   id: string;
@@ -44,6 +46,7 @@ export class GatewayServer {
   config: GatewayConfig;
   health: HealthTracker;
   usage: UsageTracker;
+  pricing: CostCalculator;
   private _keyIdx: Record<string, number> = {};
   private _pidFile: string | null;
   private _server: http.Server | null = null;
@@ -62,6 +65,7 @@ export class GatewayServer {
     this.config = config;
     this.health = new HealthTracker();
     this.usage = new UsageTracker();
+    this.pricing = new CostCalculator();
     this._pidFile = pidFile ?? null;
   }
 
@@ -112,6 +116,13 @@ export class GatewayServer {
     const parsedUrl = url.parse(req.url ?? "/", true);
     const pathname = parsedUrl.pathname ?? "/";
 
+    // Auth check
+    if (!checkGatewayAuth(this.config.auth, pathname, req.headers as Record<string, string | string[] | undefined>)) {
+      return jsonResponse(res, 401, {
+        error: { message: "Unauthorized: invalid or missing API key", type: "auth_error" },
+      });
+    }
+
     // Info endpoints
     if (pathname === "/health" && req.method === "GET") {
       return this._handleHealth(res);
@@ -124,6 +135,19 @@ export class GatewayServer {
     }
     if (pathname === "/mode" && req.method === "POST") {
       return this._handleModeSwitch(req, res);
+    }
+
+    // Per-request mode: /m/{mode}/{epName}/{pathStr}
+    const modeMatch = pathname.match(/^\/m\/([^/]+)\/([^/]+)\/(.*)$/);
+    if (modeMatch) {
+      const [, requestMode, epName, pathStr] = modeMatch;
+      if (!this.config.endpoint_modes[requestMode]) {
+        return jsonResponse(res, 400, {
+          error: { message: `Unknown mode: ${requestMode}`, type: "gateway_error" },
+        });
+      }
+      await this._handleProxy(req, res, epName, pathStr, parsedUrl.query as Record<string, string>, requestMode);
+      return;
     }
 
     // Proxy: /{endpoint}/{path...}
@@ -148,8 +172,15 @@ export class GatewayServer {
     epName: string,
     pathStr: string,
     query: Record<string, string>,
+    modeOverride?: string,
   ): Promise<void> {
-    const endpoint = this.config.endpoints[epName];
+    // Use per-request mode endpoints if specified, otherwise global config
+    const endpoints = modeOverride
+      ? this.config.endpoint_modes[modeOverride] ?? this.config.endpoints
+      : this.config.endpoints;
+    const billingMode = modeOverride || this.config.mode;
+
+    const endpoint = endpoints[epName];
     if (!endpoint) {
       return jsonResponse(res, 404, {
         error: { message: `Unknown endpoint: ${epName}`, type: "gateway_error" },
@@ -172,7 +203,7 @@ export class GatewayServer {
         endpoint, backend.id, body, originalModel,
       );
       try {
-        return await this._forward(req, res, backend, pathStr, effectiveBody, query, model, fallbackHeader);
+        return await this._forward(req, res, backend, pathStr, effectiveBody, query, model, fallbackHeader, billingMode);
       } catch (e) {
         if (e instanceof ProxyError) {
           lastErr = e;
@@ -262,6 +293,7 @@ export class GatewayServer {
     query: Record<string, string>,
     model: string,
     fallbackHeader: string,
+    billingMode?: string,
   ): Promise<void> {
     const needsTranslate = backend.translate === "anthropic-to-openai";
 
@@ -331,9 +363,9 @@ export class GatewayServer {
     const isStreaming = contentType.includes("text/event-stream");
 
     if (isStreaming) {
-      await this._stream(res, upstreamRes, backend, originalModel, fallbackHeader);
+      await this._stream(res, upstreamRes, backend, originalModel, fallbackHeader, elapsedMs, billingMode);
     } else {
-      await this._respond(res, upstreamRes, backend, originalModel, elapsedMs, fallbackHeader);
+      await this._respond(res, upstreamRes, backend, originalModel, elapsedMs, fallbackHeader, billingMode);
     }
   }
 
@@ -344,6 +376,7 @@ export class GatewayServer {
     originalModel: string,
     elapsedMs: number,
     fallbackHeader: string,
+    billingMode?: string,
   ): Promise<void> {
     const ab = await upstream.arrayBuffer();
     let respBody: Buffer = Buffer.from(ab as ArrayBuffer);
@@ -367,7 +400,7 @@ export class GatewayServer {
     }
 
     // Record usage
-    this._recordUsageIfPossible(backend, respBody, originalModel, elapsedMs);
+    this._recordUsageIfPossible(backend, respBody, originalModel, elapsedMs, billingMode);
 
     // Build response headers
     const resHeaders: Record<string, string> = {
@@ -393,6 +426,8 @@ export class GatewayServer {
     backend: Backend,
     originalModel: string,
     fallbackHeader: string,
+    elapsedMs?: number,
+    billingMode?: string,
   ): Promise<void> {
     const needsTranslate = backend.translate === "anthropic-to-openai";
 
@@ -421,6 +456,38 @@ export class GatewayServer {
 
     const reader = upstream.body.getReader();
 
+    // Accumulate SSE data to extract usage from stream events
+    let sseBuffer = "";
+    const streamUsage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+
+    const parseSSEForUsage = (chunk: string): void => {
+      sseBuffer += chunk;
+      while (sseBuffer.includes("\n\n")) {
+        const idx = sseBuffer.indexOf("\n\n");
+        const eventStr = sseBuffer.slice(0, idx).trim();
+        sseBuffer = sseBuffer.slice(idx + 2);
+        for (const line of eventStr.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") continue;
+          try {
+            const data = JSON.parse(payload);
+            // message_start contains input usage (including cache tokens)
+            if (data.type === "message_start" && data.message?.usage) {
+              const u = data.message.usage;
+              streamUsage.input_tokens = asInt(u.input_tokens ?? 0);
+              streamUsage.cache_creation_input_tokens = asInt(u.cache_creation_input_tokens ?? 0);
+              streamUsage.cache_read_input_tokens = asInt(u.cache_read_input_tokens ?? 0);
+            }
+            // message_delta contains output usage
+            if (data.type === "message_delta" && data.usage) {
+              streamUsage.output_tokens = asInt(data.usage.output_tokens ?? 0);
+            }
+          } catch { /* ignore parse errors */ }
+        }
+      }
+    };
+
     if (needsTranslate) {
       // OpenAI SSE → Anthropic SSE
       const chunks = async function* (): AsyncGenerator<Buffer> {
@@ -435,15 +502,39 @@ export class GatewayServer {
         res.write(translated);
       }
     } else {
-      // Direct SSE passthrough
+      // Direct SSE passthrough with usage extraction
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        res.write(Buffer.from(value));
+        const buf = Buffer.from(value);
+        res.write(buf);
+        try { parseSSEForUsage(buf.toString("utf-8")); } catch { /* ignore */ }
       }
     }
 
     res.end();
+
+    // Record usage extracted from stream
+    if (streamUsage.input_tokens > 0 || streamUsage.output_tokens > 0) {
+      const model = originalModel || "";
+      const provider = inferProvider(backend, model);
+      const resolvedModel = model || `${provider}/unknown`;
+      const cost = (streamUsage.cache_creation_input_tokens > 0 || streamUsage.cache_read_input_tokens > 0)
+        ? this.pricing.calculateCostWithCache(provider, resolvedModel, streamUsage.input_tokens, streamUsage.output_tokens, streamUsage.cache_creation_input_tokens, streamUsage.cache_read_input_tokens)
+        : this.pricing.calculateCost(provider, resolvedModel, streamUsage.input_tokens, streamUsage.output_tokens);
+      this.usage.recordUsage({
+        provider,
+        model: resolvedModel,
+        input_tokens: streamUsage.input_tokens,
+        output_tokens: streamUsage.output_tokens,
+        cache_creation_input_tokens: streamUsage.cache_creation_input_tokens,
+        cache_read_input_tokens: streamUsage.cache_read_input_tokens,
+        latency_ms: elapsedMs ?? 0,
+        fallback: backend.id.includes(":fb:"),
+        billing_mode: billingMode || this.config.mode,
+        cost,
+      });
+    }
   }
 
   // ------------------------------------------------------------------
@@ -485,6 +576,7 @@ export class GatewayServer {
     responseBody: Buffer,
     originalModel: string,
     elapsedMs: number,
+    billingMode?: string,
   ): void {
     let payload: Record<string, unknown>;
     try {
@@ -498,17 +590,26 @@ export class GatewayServer {
 
     const inputTokens = asInt(usage.input_tokens ?? usage.prompt_tokens ?? 0);
     const outputTokens = asInt(usage.output_tokens ?? usage.completion_tokens ?? 0);
+    const cacheCreationInputTokens = asInt(usage.cache_creation_input_tokens ?? 0);
+    const cacheReadInputTokens = asInt(usage.cache_read_input_tokens ?? 0);
     if (!model && !inputTokens && !outputTokens) return;
 
     const provider = inferProvider(backend, model);
+    const resolvedModel = model || `${provider}/unknown`;
+    const cost = (cacheCreationInputTokens > 0 || cacheReadInputTokens > 0)
+      ? this.pricing.calculateCostWithCache(provider, resolvedModel, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens)
+      : this.pricing.calculateCost(provider, resolvedModel, inputTokens, outputTokens);
     this.usage.recordUsage({
       provider,
-      model: model || `${provider}/unknown`,
+      model: resolvedModel,
       input_tokens: inputTokens,
       output_tokens: outputTokens,
+      cache_creation_input_tokens: cacheCreationInputTokens,
+      cache_read_input_tokens: cacheReadInputTokens,
       latency_ms: elapsedMs,
       fallback: backend.id.includes(":fb:"),
-      billing_mode: this.config.mode,
+      billing_mode: billingMode || this.config.mode,
+      cost,
     });
   }
 
@@ -731,6 +832,11 @@ export class GatewayServer {
     const base = `http://${this.config.host}:${this.config.port}`;
     console.log();
     console.log(`  aistatus gateway running on ${base}`);
+    if (this.config.auth?.enabled) {
+      const nKeys = this.config.auth.keys.length;
+      const publicPaths = (this.config.auth.public_paths ?? ["/health"]).join(", ");
+      console.log(`  Auth: ${nKeys} key${nKeys !== 1 ? "s" : ""} configured (public: ${publicPaths})`);
+    }
     console.log();
     for (const [epName, ep] of Object.entries(this.config.endpoints)) {
       const nk = ep.keys.length;

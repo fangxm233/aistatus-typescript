@@ -1,6 +1,7 @@
 import { extractText, fetchJson, joinUrl, readEnv, requireApiKey } from "../http";
 import type {
   ChatMessage,
+  ContentBlock,
   ProviderCallOptions,
   RouteResponse as RouteResponseShape,
 } from "../models";
@@ -44,10 +45,19 @@ export class OpenAIAdapter extends ProviderAdapter {
     messages: ChatMessage[],
     options: ProviderCallOptions,
   ): Record<string, unknown> {
+    const openaiMessages = messages.map((msg) => ({
+      role: msg.role,
+      content: typeof msg.content === "string"
+        ? msg.content
+        : contentBlocksToOpenAI(msg.content),
+      ...(msg.name ? { name: msg.name } : {}),
+      ...(msg.toolCallId ? { tool_call_id: msg.toolCallId } : {}),
+    }));
+
     const payload: Record<string, unknown> = {
       ...(options.providerOptions ?? {}),
       model: this.stripProvider(modelId),
-      messages,
+      messages: openaiMessages,
     };
 
     if (
@@ -64,6 +74,10 @@ export class OpenAIAdapter extends ProviderAdapter {
 
     if (options.topP !== undefined && payload.top_p === undefined) {
       payload.top_p = options.topP;
+    }
+
+    if (options.responseFormat && payload.response_format === undefined) {
+      payload.response_format = options.responseFormat;
     }
 
     return payload;
@@ -108,6 +122,27 @@ export class OpenAIAdapter extends ProviderAdapter {
       raw: response,
     });
   }
+}
+
+function contentBlocksToOpenAI(blocks: ContentBlock[]): unknown[] {
+  return blocks.map((block) => {
+    switch (block.type) {
+      case "text":
+        return { type: "text", text: block.text };
+      case "image_url":
+        return { type: "image_url", image_url: block.image_url };
+      case "image":
+        // Convert Anthropic-style base64 to OpenAI data URI
+        return {
+          type: "image_url",
+          image_url: {
+            url: `data:${block.source.media_type};base64,${block.source.data}`,
+          },
+        };
+      default:
+        return block;
+    }
+  });
 }
 
 registerAdapterType("openai", OpenAIAdapter);

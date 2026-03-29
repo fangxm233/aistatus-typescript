@@ -4,6 +4,7 @@ import type {
   ProviderCallOptions,
   ProviderConfig,
   RouteResponse,
+  StreamChunk,
 } from "../models";
 
 export abstract class ProviderAdapter {
@@ -44,6 +45,14 @@ export abstract class ProviderAdapter {
     timeoutSeconds: number,
     options: ProviderCallOptions,
   ): Promise<RouteResponse>;
+
+  /** Optional streaming. Adapters that don't implement this will use call() fallback. */
+  callStream?(
+    modelId: string,
+    messages: ChatMessage[],
+    timeoutSeconds: number,
+    options: ProviderCallOptions,
+  ): AsyncGenerator<StreamChunk>;
 }
 
 type ProviderAdapterConstructor = new (config: ProviderConfig) => ProviderAdapter;

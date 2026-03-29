@@ -1,6 +1,8 @@
+import { extractTextFromContent } from "../content";
 import { fetchJson, joinUrl, readEnv, requireApiKey } from "../http";
 import type {
   ChatMessage,
+  ContentBlock,
   ProviderCallOptions,
   RouteResponse as RouteResponseShape,
 } from "../models";
@@ -32,7 +34,7 @@ export class AnthropicAdapter extends ProviderAdapter {
     const anthropicMessages = messages
       .filter((message) => {
         if (message.role === "system") {
-          systemParts.push(message.content);
+          systemParts.push(extractTextFromContent(message.content));
           return false;
         }
 
@@ -40,7 +42,9 @@ export class AnthropicAdapter extends ProviderAdapter {
       })
       .map((message) => ({
         role: message.role === "assistant" ? "assistant" : "user",
-        content: message.content,
+        content: typeof message.content === "string"
+          ? message.content
+          : contentBlocksToAnthropic(message.content),
       }));
 
     const payload: Record<string, unknown> = {
@@ -50,7 +54,14 @@ export class AnthropicAdapter extends ProviderAdapter {
     };
 
     if (systemParts.length > 0 && payload.system === undefined) {
-      payload.system = systemParts.join("\n\n");
+      const systemText = systemParts.join("\n\n");
+      const rfSuffix = responseFormatSuffix(options);
+      payload.system = rfSuffix ? `${systemText}\n\n${rfSuffix}` : systemText;
+    } else if (options.responseFormat && options.responseFormat.type !== "text") {
+      const rfSuffix = responseFormatSuffix(options);
+      if (rfSuffix) {
+        payload.system = rfSuffix;
+      }
     }
 
     if (payload.max_tokens === undefined) {
@@ -98,6 +109,41 @@ export class AnthropicAdapter extends ProviderAdapter {
       raw: response,
     });
   }
+}
+
+function contentBlocksToAnthropic(blocks: ContentBlock[]): unknown[] {
+  return blocks.map((block) => {
+    switch (block.type) {
+      case "text":
+        return { type: "text", text: block.text };
+      case "image_url":
+        return {
+          type: "image",
+          source: { type: "url", url: block.image_url.url },
+        };
+      case "image":
+        return {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: block.source.media_type,
+            data: block.source.data,
+          },
+        };
+      default:
+        return block;
+    }
+  });
+}
+
+function responseFormatSuffix(options: ProviderCallOptions): string | null {
+  const rf = options.responseFormat;
+  if (!rf || rf.type === "text") return null;
+  if (rf.type === "json_object") return "Respond with valid JSON only.";
+  if (rf.type === "json_schema") {
+    return `Respond with valid JSON matching this schema:\n${JSON.stringify(rf.json_schema.schema, null, 2)}`;
+  }
+  return null;
 }
 
 registerAdapterType("anthropic", AnthropicAdapter);

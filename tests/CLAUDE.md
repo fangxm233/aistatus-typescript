@@ -12,4 +12,9 @@ SDK 回归测试目录，覆盖 config、gateway server、usage、router、healt
 | `router.test.mjs` | regression test | Verify routing fallback behavior and provider alias handling |
 | `status-api.test.mjs` | regression test | Verify StatusAPI response parsing and provider normalization |
 | `translate.test.mjs` | regression test | Verify Anthropic↔OpenAI payload and SSE translation |
-| `pricing.test.mjs` | regression test | Verify token pricing cost calculation behavior |
+| `pricing.test.mjs` | regression test | Verify token pricing cost calculation behavior including cache-aware costs |
+| `router-advanced.test.mjs` | regression test | Verify router health tracking, model fallback chains, 429 retry, cache tokens, and streaming |
+| `gateway-mode.test.mjs` | integration test | Verify per-request mode routing via /m/{mode}/{ep}/{path} URL pattern |
+| `middleware.test.mjs` | regression test | Verify middleware hooks (beforeRequest, afterResponse, onError), execution order, dynamic use(), abort, tier routing, and fallback integration |
+| `gateway-auth.test.mjs` | regression test | Verify gateway API key authentication: Bearer/custom header, public paths, env var resolution, backward compatibility |
+| `multimodal-structured-stream.test.mjs` | regression test | Verify multimodal ContentBlock[] messages, ResponseFormat options, StreamChunk error type, routeStreamCallbacks, streamToReadable, and AbortSignal cancellation |

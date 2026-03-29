@@ -1,6 +1,8 @@
+import { extractTextFromContent } from "../content";
 import { fetchJson, isRecord, readEnv, requireApiKey } from "../http";
 import type {
   ChatMessage,
+  ContentBlock,
   ProviderCallOptions,
   RouteResponse as RouteResponseShape,
 } from "../models";
@@ -40,7 +42,7 @@ export class GoogleAdapter extends ProviderAdapter {
     const contents = messages
       .filter((message) => {
         if (message.role === "system") {
-          systemParts.push(message.content);
+          systemParts.push(extractTextFromContent(message.content));
           return false;
         }
 
@@ -48,7 +50,9 @@ export class GoogleAdapter extends ProviderAdapter {
       })
       .map((message) => ({
         role: message.role === "assistant" ? "model" : "user",
-        parts: [{ text: message.content }],
+        parts: typeof message.content === "string"
+          ? [{ text: message.content }]
+          : contentBlocksToGoogle(message.content),
       }));
 
     if (
@@ -67,6 +71,16 @@ export class GoogleAdapter extends ProviderAdapter {
 
     if (options.topP !== undefined && generationConfig.topP === undefined) {
       generationConfig.topP = options.topP;
+    }
+
+    if (options.responseFormat && generationConfig.responseMimeType === undefined) {
+      const rf = options.responseFormat;
+      if (rf.type === "json_object") {
+        generationConfig.responseMimeType = "application/json";
+      } else if (rf.type === "json_schema") {
+        generationConfig.responseMimeType = "application/json";
+        generationConfig.responseSchema = rf.json_schema.schema;
+      }
     }
 
     const body: Record<string, unknown> = {
@@ -119,6 +133,27 @@ export class GoogleAdapter extends ProviderAdapter {
       raw: response,
     });
   }
+}
+
+function contentBlocksToGoogle(blocks: ContentBlock[]): unknown[] {
+  return blocks.map((block) => {
+    switch (block.type) {
+      case "text":
+        return { text: block.text };
+      case "image_url":
+        // Google doesn't support URL references directly; pass as-is text fallback
+        return { text: `[image: ${block.image_url.url}]` };
+      case "image":
+        return {
+          inlineData: {
+            mimeType: block.source.media_type,
+            data: block.source.data,
+          },
+        };
+      default:
+        return block;
+    }
+  });
 }
 
 function normalizeGoogleModelName(modelName: string): string {

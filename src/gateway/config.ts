@@ -11,6 +11,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import yaml from "yaml";
+
+import type { GatewayAuthConfig } from "./auth.js";
 
 const CONFIG_DIR = path.join(os.homedir(), ".aistatus");
 const CONFIG_FILE = path.join(CONFIG_DIR, "gateway.yaml");
@@ -82,6 +85,7 @@ export interface GatewayConfig {
   port: number;
   status_check: boolean;
   mode: string;
+  auth?: GatewayAuthConfig;
   endpoints: Record<string, EndpointConfig>;
   endpoint_modes: Record<string, Record<string, EndpointConfig>>;
 }
@@ -197,11 +201,24 @@ export function fromDict(raw: Record<string, unknown>): GatewayConfig {
   const activeMode = endpoint_modes[mode] ? mode : (availableModes[0] ?? "default");
   endpoint_modes[activeMode] ??= {};
 
+  let auth: GatewayAuthConfig | undefined;
+  const rawAuth = raw.auth as Record<string, unknown> | undefined;
+  if (rawAuth) {
+    const authKeys = resolveKeys((rawAuth.keys as unknown[]) ?? []);
+    auth = {
+      enabled: rawAuth.enabled !== false && authKeys.length > 0,
+      keys: authKeys,
+      header: (rawAuth.header as string) ?? "authorization",
+      public_paths: (rawAuth.public_paths as string[]) ?? ["/health"],
+    };
+  }
+
   return {
     host,
     port,
     status_check,
     mode: activeMode,
+    auth,
     endpoints: endpoint_modes[activeMode],
     endpoint_modes,
   };
@@ -261,16 +278,6 @@ export function loadConfig(configPath?: string): GatewayConfig {
     return autoDiscover();
   }
 
-  // Dynamic import of yaml — it's an optional dependency
-  let yaml: { parse: (s: string) => unknown };
-  try {
-    yaml = require("yaml");
-  } catch {
-    throw new Error(
-      "Gateway config requires the 'yaml' package.\nInstall with: npm install yaml"
-    );
-  }
-
   const content = fs.readFileSync(filePath, "utf-8");
   const raw = (yaml.parse(content) as Record<string, unknown>) ?? {};
   return fromDict(raw);
@@ -288,6 +295,13 @@ export function generateConfig(): string {
 #   npx aistatus-gateway start --auto
 
 port: 9880
+
+# ── Authentication ─────────────────────────────────────────────
+# auth:
+#   keys:
+#     - $GATEWAY_API_KEY
+#   # header: authorization  # default: Bearer scheme
+#   # public_paths: ["/health"]  # default
 
 # ── Anthropic (for Claude Code) ─────────────────────────────────
 anthropic:

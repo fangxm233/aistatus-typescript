@@ -146,6 +146,8 @@ export class UsageTracker {
     model: string;
     input_tokens: number;
     output_tokens: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
     latency_ms: number;
     fallback: boolean;
     cost?: number;
@@ -162,6 +164,12 @@ export class UsageTracker {
       latency_ms: opts.latency_ms,
       billing_mode: opts.billing_mode,
     };
+    if (opts.cache_creation_input_tokens) {
+      record.cache_creation_in = opts.cache_creation_input_tokens;
+    }
+    if (opts.cache_read_input_tokens) {
+      record.cache_read_in = opts.cache_read_input_tokens;
+    }
     this.storage.append(record);
     return record;
   }

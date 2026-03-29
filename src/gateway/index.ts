@@ -14,6 +14,8 @@
 export { GatewayServer } from "./server.js";
 export { loadConfig, autoDiscover, generateConfig, fromDict } from "./config.js";
 export type { GatewayConfig, EndpointConfig, FallbackConfig } from "./config.js";
+export { checkGatewayAuth } from "./auth.js";
+export type { GatewayAuthConfig } from "./auth.js";
 export { HealthTracker } from "./health.js";
 export {
   anthropicRequestToOpenai,

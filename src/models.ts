@@ -7,9 +7,14 @@ export enum Status {
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 
+export type TextBlock = { type: "text"; text: string };
+export type ImageUrlBlock = { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
+export type ImageBase64Block = { type: "image"; source: { type: "base64"; media_type: string; data: string } };
+export type ContentBlock = TextBlock | ImageUrlBlock | ImageBase64Block;
+
 export interface ChatMessage {
   role: MessageRole | (string & {});
-  content: string;
+  content: string | ContentBlock[];
   name?: string;
   toolCallId?: string;
 }
@@ -32,10 +37,16 @@ export interface RouteConfig {
   providerTimeout?: number;
 }
 
+export type ResponseFormat =
+  | { type: "text" }
+  | { type: "json_object" }
+  | { type: "json_schema"; json_schema: { name: string; schema: Record<string, unknown>; strict?: boolean } };
+
 export interface ProviderCallOptions {
   maxTokens?: number;
   temperature?: number;
   topP?: number;
+  responseFormat?: ResponseFormat;
   providerOptions?: Record<string, unknown>;
   headers?: Record<string, string>;
   signal?: AbortSignal;
@@ -48,6 +59,12 @@ export interface RouteOptions extends ProviderCallOptions {
   allowFallback?: boolean;
   timeout?: number;
   prefer?: string[];
+  /** Model fallback chains: when all providers fail for a model, try the next model. */
+  modelFallbacks?: Record<string, string[]>;
+  /** Retry on 429 before falling to next candidate (default: true). */
+  retryOnRateLimit?: boolean;
+  /** Delay in ms before retrying on 429 (default: 1000). */
+  retryDelay?: number;
   [key: string]: unknown;
 }
 
@@ -110,6 +127,8 @@ export interface RouteResponseInit {
   fallbackReason?: string | null;
   inputTokens?: number;
   outputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
   costUsd?: number;
   raw?: unknown;
 }
@@ -122,6 +141,8 @@ export class RouteResponse {
   fallbackReason: string | null;
   inputTokens: number;
   outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
   costUsd: number;
   raw: unknown;
 
@@ -133,6 +154,8 @@ export class RouteResponse {
     this.fallbackReason = init.fallbackReason ?? null;
     this.inputTokens = init.inputTokens ?? 0;
     this.outputTokens = init.outputTokens ?? 0;
+    this.cacheCreationInputTokens = init.cacheCreationInputTokens ?? 0;
+    this.cacheReadInputTokens = init.cacheReadInputTokens ?? 0;
     this.costUsd = init.costUsd ?? 0;
     this.raw = init.raw ?? null;
   }
@@ -140,4 +163,15 @@ export class RouteResponse {
   toString(): string {
     return this.content;
   }
+}
+
+/** Chunk emitted by Router.routeStream() */
+export interface StreamChunk {
+  type: "text" | "usage" | "done" | "error";
+  text?: string;
+  error?: Error;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
 }
