@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.4 — 2026-04-04
+
+### Added
+
+- Persistent usage-upload configuration helpers backed by `~/.aistatus/config.yaml`
+  with `configure() > env vars > config file > defaults` precedence
+- Fire-and-forget `UsageUploader` that POSTs usage records to
+  `https://aistatus.cc/api/usage/upload` and swallows network failures
+- Leaderboard support in the SDK usage pipeline: routers and gateway usage
+  tracking now forward uploaded records with user identity metadata
+
 ## 0.0.3 — 2026-03-23
 
 Initial public release of the TypeScript SDK.

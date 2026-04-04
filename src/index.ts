@@ -1,4 +1,4 @@
-// input: provider adapter registrations plus route/status/usage/pricing/config modules from the SDK runtime
+// input: provider adapter registrations plus route/status/usage/pricing/config modules from the SDK runtime and release metadata
 // output: public aistatus SDK exports, default router helpers, version constant, and persistent upload config helpers for consumers
 // pos: root SDK module that wires provider registrations and exposes the package's main API surface
 // >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
@@ -58,7 +58,7 @@ export { UsageUploader } from "./uploader";
 export { CostCalculator } from "./pricing";
 export type { Middleware, BeforeRequestContext, AfterResponseContext } from "./middleware";
 
-export const VERSION = "0.0.3";
+export const VERSION = "0.0.4";
 
 let defaultRouter: Router | null = null;
 
