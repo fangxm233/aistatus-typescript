@@ -3,8 +3,8 @@
  * Records API usage per request and provides summary/grouping.
  */
 
-// input: per-request usage payloads from gateway/router code and optional filesystem base dir
-// output: persisted JSONL usage records plus aggregate summaries/groupings for reporting APIs
+// input: per-request usage payloads from gateway/router code, optional upload bridge, and optional filesystem base dir
+// output: persisted JSONL usage records plus aggregate summaries/groupings for reporting APIs and optional uploader fan-out
 // pos: shared usage storage/tracking layer used by the gateway /usage endpoint and SDK usage reporting
 // >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
 
@@ -12,6 +12,24 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
+
+interface UsageUploadRecord extends Record<string, unknown> {
+  ts: string;
+  provider: string;
+  model: string;
+  in?: number;
+  out?: number;
+  cache_creation_in?: number;
+  cache_read_in?: number;
+  cost?: number;
+  latency_ms?: number;
+  fallback?: boolean;
+  billing_mode?: string;
+}
+
+interface UsageUploadTarget {
+  upload(record: UsageUploadRecord): void;
+}
 
 // ---------------------------------------------------------------------------
 // UsageStorage — JSONL file persistence
@@ -136,9 +154,11 @@ function periodSince(period: string): Date | null {
 
 export class UsageTracker {
   storage: UsageStorage;
+  uploader: UsageUploadTarget | null;
 
-  constructor(storage?: UsageStorage) {
+  constructor(storage?: UsageStorage, uploader?: UsageUploadTarget | null) {
     this.storage = storage ?? new UsageStorage();
+    this.uploader = uploader ?? null;
   }
 
   recordUsage(opts: {
@@ -152,8 +172,8 @@ export class UsageTracker {
     fallback: boolean;
     cost?: number;
     billing_mode?: string;
-  }): Record<string, unknown> {
-    const record: Record<string, unknown> = {
+  }): UsageUploadRecord {
+    const record: UsageUploadRecord = {
       ts: new Date().toISOString(),
       provider: opts.provider,
       model: opts.model,
@@ -171,6 +191,7 @@ export class UsageTracker {
       record.cache_read_in = opts.cache_read_input_tokens;
     }
     this.storage.append(record);
+    this.uploader?.upload(record);
     return record;
   }
 

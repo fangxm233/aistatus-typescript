@@ -266,16 +266,51 @@ test("Gateway server supports POST /mode and records mode in health/status", asy
   }
 });
 
-test("Gateway server rejects invalid POST /mode requests", async () => {
-  const { GatewayServer } = await import("../dist/gateway/index.js");
+test("Gateway server uploads usage records after a successful proxied request", async () => {
+  const { GatewayServer } = await import(`../dist/gateway/index.js?server-upload=${Date.now()}`);
+  const { configure } = await import(`../dist/index.js?server-upload=${Date.now()}`);
+
+  const savedFetch = globalThis.fetch;
+  const fetchCalls = [];
+
+  globalThis.fetch = async (input, init) => {
+    fetchCalls.push({ input, init });
+    if (String(input) === "https://aistatus.cc/api/usage/upload") {
+      return new Response(null, { status: 204 });
+    }
+    return new Response(JSON.stringify({
+      id: "msg_123",
+      model: "claude-sonnet-4-6",
+      content: [{ type: "text", text: "hello" }],
+      usage: { input_tokens: 12, output_tokens: 34 },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  configure({
+    name: "Gateway User",
+    org: "Gateway Org",
+    email: "gateway@example.com",
+    uploadEnabled: true,
+  });
 
   const config = {
     host: "127.0.0.1",
     port: 0,
     status_check: false,
-    mode: "api",
-    endpoints: {},
-    endpoint_modes: { api: {} },
+    endpoints: {
+      anthropic: {
+        name: "anthropic",
+        base_url: "https://api.anthropic.com",
+        auth_style: "anthropic",
+        keys: ["sk-ant-test"],
+        passthrough: false,
+        fallbacks: [],
+        model_fallbacks: {},
+      },
+    },
   };
 
   const freePort = await new Promise((resolve) => {
@@ -300,17 +335,28 @@ test("Gateway server rejects invalid POST /mode requests", async () => {
   await new Promise((resolve) => httpServer.listen(freePort, "127.0.0.1", resolve));
 
   try {
-    const res = await request(freePort, "/mode", {
+    const res = await request(freePort, "/anthropic/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mode: "plan" }),
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
     });
-    assert.equal(res.status, 400);
-    assert.match(res.body, /Unknown mode: plan/);
+
+    assert.equal(res.status, 200);
+    const uploadCall = fetchCalls.find((call) => String(call.input) === "https://aistatus.cc/api/usage/upload");
+    assert.ok(uploadCall, "expected usage upload fetch call");
+    const payload = JSON.parse(uploadCall.init.body);
+    assert.equal(payload.records[0].name, "Gateway User");
+    assert.equal(payload.records[0].email, "gateway@example.com");
+    assert.equal(payload.records[0].provider, "anthropic");
+    assert.equal(payload.records[0].model, "claude-sonnet-4-6");
+    assert.equal(payload.records[0].input_tokens, 12);
+    assert.equal(payload.records[0].output_tokens, 34);
   } finally {
+    globalThis.fetch = savedFetch;
     httpServer.close();
   }
 });
+
 
 test("Gateway server /usage supports format=records and since filtering", async () => {
   const { GatewayServer } = await import("../dist/gateway/index.js");

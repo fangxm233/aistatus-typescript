@@ -21,6 +21,8 @@ import { HealthTracker } from "./health.js";
 import { anthropicRequestToOpenai, openaiResponseToAnthropic, openaiSseToAnthropicSse } from "./translate.js";
 import { UsageTracker } from "../usage.js";
 import { CostCalculator } from "../pricing.js";
+import { getConfig } from "../config.js";
+import { UsageUploader } from "../uploader.js";
 
 interface Backend {
   id: string;
@@ -64,7 +66,7 @@ export class GatewayServer {
 
     this.config = config;
     this.health = new HealthTracker();
-    this.usage = new UsageTracker();
+    this.usage = new UsageTracker(undefined, new UsageUploader(getConfig()));
     this.pricing = new CostCalculator();
     this._pidFile = pidFile ?? null;
   }

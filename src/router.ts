@@ -3,6 +3,10 @@ import { AUTO_PROVIDERS, MODEL_PREFIX_MAP, normalizeProviderSlug } from "./defau
 import { AllProvidersDown, ProviderCallFailed } from "./errors";
 import { HealthTracker } from "./gateway/health";
 import { readEnv } from "./http";
+import { CostCalculator } from "./pricing";
+import { getConfig } from "./config";
+import { UsageUploader } from "./uploader";
+import { UsageTracker } from "./usage";
 import type {
   Middleware,
   BeforeRequestContext,
@@ -60,6 +64,8 @@ export class Router {
   private readonly tiers = new Map<string, string[]>();
   private readonly health: HealthTracker | null;
   private readonly middleware: Middleware[];
+  private readonly pricing: CostCalculator;
+  private readonly usage: UsageTracker;
 
   constructor(options: RouterOptions = {}) {
     this.api = new StatusAPI(
@@ -69,6 +75,8 @@ export class Router {
 
     this.health = options.healthTracking !== false ? new HealthTracker() : null;
     this.middleware = options.middleware ?? [];
+    this.pricing = new CostCalculator();
+    this.usage = new UsageTracker(undefined, new UsageUploader(getConfig()));
 
     if (options.autoDiscover !== false) {
       this.autoDiscover(options.providers);
@@ -485,6 +493,7 @@ export class Router {
           }
         }
 
+        this.recordUsage(routeResponse, candidate.providerSlug, latencyMs, isFallback);
         return routeResponse;
       } catch (error) {
         const status = (error as { status?: number }).status;
@@ -569,6 +578,7 @@ export class Router {
               }
             }
 
+            this.recordUsage(routeResponse, candidate.providerSlug, latencyMsRetry, isFallback);
             return routeResponse;
           } catch (retryError) {
             const retryStatus = (retryError as { status?: number }).status;
@@ -660,6 +670,38 @@ export class Router {
     }
 
     throw new AllProvidersDown(tried);
+  }
+  private recordUsage(
+    response: RouteResponse,
+    provider: string,
+    latencyMs: number,
+    wasFallback: boolean,
+  ): void {
+    const model = response.modelUsed || `${provider}/unknown`;
+    const cost = response.costUsd > 0
+      ? response.costUsd
+      : ((response.cacheCreationInputTokens > 0 || response.cacheReadInputTokens > 0)
+        ? this.pricing.calculateCostWithCache(
+            provider,
+            model,
+            response.inputTokens,
+            response.outputTokens,
+            response.cacheCreationInputTokens,
+            response.cacheReadInputTokens,
+          )
+        : this.pricing.calculateCost(provider, model, response.inputTokens, response.outputTokens));
+
+    this.usage.recordUsage({
+      provider,
+      model,
+      input_tokens: response.inputTokens,
+      output_tokens: response.outputTokens,
+      cache_creation_input_tokens: response.cacheCreationInputTokens,
+      cache_read_input_tokens: response.cacheReadInputTokens,
+      latency_ms: latencyMs,
+      fallback: wasFallback,
+      cost,
+    });
   }
 }
 

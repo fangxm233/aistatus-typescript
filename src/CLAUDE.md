@@ -10,12 +10,12 @@ TypeScript SDK 源码目录，包含主 SDK 导出、gateway 配置/服务与共
 | `content.ts` | content helpers | extractTextFromContent and normalizeContent for converting between string and ContentBlock[] |
 | `stream.ts` | stream utilities | streamToReadable: converts routeStream() AsyncGenerator to Web ReadableStream<string> |
 | `middleware.ts` | hook definitions | Middleware interface with beforeRequest, afterResponse, onError hooks for request/response interception |
-| `router.ts` | routing engine | Model/tier routing with health tracking, model fallback chains, 429 retry, streaming (routeStream), callback streaming (routeStreamCallbacks), and middleware hooks |
+| `router.ts` | routing engine | Model/tier routing with health tracking, model fallback chains, 429 retry, streaming (routeStream), callback streaming (routeStreamCallbacks), middleware hooks, and post-route usage upload wiring |
 | `api.ts` | API client | StatusAPI client for aistatus.cc model/provider status checks |
 | `errors.ts` | error classes | AllProvidersDown, ProviderCallFailed, and other typed errors |
 | `http.ts` | HTTP utilities | fetchJson, readEnv, extractText, joinUrl helpers |
 | `defaults.ts` | provider defaults | AUTO_PROVIDERS, MODEL_PREFIX_MAP, PROVIDER_ALIASES for auto-discovery and routing |
-| `usage.ts` | shared library | Persist per-request usage records (with cache tokens) and compute aggregate summaries/groupings |
+| `usage.ts` | shared library | Persist per-request usage records (with cache tokens), compute aggregate summaries/groupings, and optionally forward records to the uploader |
 | `pricing.ts` | cost calculator | CostCalculator with calculateCost and calculateCostWithCache (fetches per-provider cache pricing from API, falls back to 1.25x/0.10x multipliers) |
 | `config.ts` | SDK config layer | Persistent upload config helpers with configure/env/file/default precedence and YAML file I/O at `~/.aistatus/config.yaml` |
 | `uploader.ts` | upload bridge | Build usage upload payloads and POST them asynchronously with silent failure semantics |

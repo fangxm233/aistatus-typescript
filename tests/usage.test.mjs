@@ -95,6 +95,41 @@ test("UsageTracker records optional billing_mode", async () => {
   }
 });
 
+test("UsageTracker forwards records to uploader after persistence", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-uploader-forward-test-"));
+
+  try {
+    const { UsageStorage, UsageTracker } = await import("../dist/index.js");
+    const storage = new UsageStorage(tmpDir, "/test/project4");
+    const uploaded = [];
+    const tracker = new UsageTracker(storage, {
+      upload(record) {
+        uploaded.push(record);
+      },
+    });
+
+    const record = tracker.recordUsage({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      input_tokens: 7,
+      output_tokens: 8,
+      cache_creation_input_tokens: 2,
+      cache_read_input_tokens: 1,
+      latency_ms: 90,
+      fallback: true,
+      cost: 0.123,
+    });
+
+    const stored = storage.read("all");
+    assert.equal(stored.length, 1);
+    assert.equal(uploaded.length, 1);
+    assert.deepEqual(uploaded[0], record);
+    assert.equal(uploaded[0].fallback, true);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("UsageStorage persists records to JSONL files", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-storage-test-"));
 
