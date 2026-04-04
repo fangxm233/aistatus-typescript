@@ -54,6 +54,7 @@ export {
   saveToFile,
   type AIStatusConfig,
 } from "./config";
+export { UsageUploader } from "./uploader";
 export { CostCalculator } from "./pricing";
 export type { Middleware, BeforeRequestContext, AfterResponseContext } from "./middleware";
 

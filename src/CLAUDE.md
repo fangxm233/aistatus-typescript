@@ -18,5 +18,6 @@ TypeScript SDK 源码目录，包含主 SDK 导出、gateway 配置/服务与共
 | `usage.ts` | shared library | Persist per-request usage records (with cache tokens) and compute aggregate summaries/groupings |
 | `pricing.ts` | cost calculator | CostCalculator with calculateCost and calculateCostWithCache (fetches per-provider cache pricing from API, falls back to 1.25x/0.10x multipliers) |
 | `config.ts` | SDK config layer | Persistent upload config helpers with configure/env/file/default precedence and YAML file I/O at `~/.aistatus/config.yaml` |
+| `uploader.ts` | upload bridge | Build usage upload payloads and POST them asynchronously with silent failure semantics |
 | `providers/` | adapter layer | ProviderAdapter base class + Anthropic, OpenAI, Google, OpenRouter, Compatible adapters |
 | `gateway/` | gateway module | Gateway config parsing, server runtime (with per-request mode routing), health tracking, and translation exports |
