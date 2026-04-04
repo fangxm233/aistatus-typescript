@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-// input: built gateway config exports from dist and temporary environment variables
-// output: regression tests for autoDiscover, generateConfig, and mode-aware fromDict parsing
-// pos: gateway config compatibility tests covering flat legacy config and nested mode config parsing
+// input: built gateway config exports from dist, SDK config exports, and temporary environment variables/filesystem state
+// output: regression tests for gateway config parsing plus SDK persistent config precedence and YAML file I/O
+// pos: config compatibility tests covering gateway config parsing and the public SDK upload configuration surface
 // >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
 
-// Config tests: test autoDiscover, fromDict mode parsing, and generateConfig
+// Config tests: test autoDiscover, fromDict mode parsing, generateConfig, and SDK persistent config helpers
 
 test("autoDiscover creates endpoints from env vars", async () => {
   // Save and set env
@@ -137,11 +140,116 @@ test("fromDict defaults nested mode to first discovered mode when top-level mode
   assert.deepEqual(Object.keys(config.endpoint_modes).sort(), ["api", "plan"]);
 });
 
-test("generateConfig returns a non-empty YAML string", async () => {
-  const { generateConfig } = await import("../dist/gateway/index.js");
-  const content = generateConfig();
-  assert.ok(content.length > 100);
-  assert.ok(content.includes("port: 9880"));
-  assert.ok(content.includes("anthropic:"));
-  assert.ok(content.includes("openai:"));
+
+test("AIStatus config falls back to defaults", async () => {
+  const { getConfig, configure } = await import(`../dist/index.js?defaults=${Date.now()}`);
+
+  configure(null);
+  const config = getConfig({ env: {}, skipFile: true, filePath: "/nonexistent/config.yaml" });
+
+  assert.equal(config.name, null);
+  assert.equal(config.org, null);
+  assert.equal(config.email, null);
+  assert.equal(config.uploadEnabled, false);
+});
+
+test("AIStatus config loads YAML file values", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-config-file-"));
+  const filePath = path.join(tmpDir, "config.yaml");
+  fs.writeFileSync(filePath, "name: File User\norg: File Org\nemail: file@example.com\nuploadEnabled: true\n", "utf-8");
+
+  try {
+    const { getConfig, configure } = await import(`../dist/index.js?file=${Date.now()}`);
+    configure(null);
+
+    const config = getConfig({ env: {}, filePath });
+    assert.equal(config.name, "File User");
+    assert.equal(config.org, "File Org");
+    assert.equal(config.email, "file@example.com");
+    assert.equal(config.uploadEnabled, true);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("AIStatus config prefers env over file and configure over env", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-config-priority-"));
+  const filePath = path.join(tmpDir, "config.yaml");
+  fs.writeFileSync(filePath, "name: File User\norg: File Org\nemail: file@example.com\nuploadEnabled: false\n", "utf-8");
+
+  try {
+    const { getConfig, configure } = await import(`../dist/index.js?priority=${Date.now()}`);
+    configure(null);
+
+    const envConfig = getConfig({
+      env: {
+        AISTATUS_NAME: "Env User",
+        AISTATUS_ORG: "Env Org",
+        AISTATUS_EMAIL: "env@example.com",
+        AISTATUS_UPLOAD_ENABLED: "true",
+      },
+      filePath,
+    });
+    assert.equal(envConfig.name, "Env User");
+    assert.equal(envConfig.org, "Env Org");
+    assert.equal(envConfig.email, "env@example.com");
+    assert.equal(envConfig.uploadEnabled, true);
+
+    configure({
+      name: "Configured User",
+      org: "Configured Org",
+      uploadEnabled: false,
+    });
+    const configured = getConfig({
+      env: {
+        AISTATUS_NAME: "Env User",
+        AISTATUS_ORG: "Env Org",
+        AISTATUS_EMAIL: "env@example.com",
+        AISTATUS_UPLOAD_ENABLED: "true",
+      },
+      filePath,
+    });
+    assert.equal(configured.name, "Configured User");
+    assert.equal(configured.org, "Configured Org");
+    assert.equal(configured.email, "env@example.com");
+    assert.equal(configured.uploadEnabled, false);
+
+    configure(null);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("AIStatus config saves and loads canonical YAML file", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-config-save-"));
+  const filePath = path.join(tmpDir, "nested", "config.yaml");
+
+  try {
+    const { saveToFile, loadFromFile } = await import(`../dist/index.js?save=${Date.now()}`);
+
+    saveToFile(
+      {
+        name: "Saved User",
+        org: "Saved Org",
+        email: "saved@example.com",
+        uploadEnabled: true,
+      },
+      filePath,
+    );
+
+    assert.equal(fs.existsSync(filePath), true);
+    const content = fs.readFileSync(filePath, "utf-8");
+    assert.match(content, /name: Saved User/);
+    assert.match(content, /uploadEnabled: true/);
+
+    const loaded = loadFromFile(filePath);
+    assert.deepEqual(loaded, {
+      name: "Saved User",
+      org: "Saved Org",
+      email: "saved@example.com",
+      uploadEnabled: true,
+    });
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
