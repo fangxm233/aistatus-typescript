@@ -151,6 +151,66 @@ Bridges local usage tracking to the remote leaderboard API.
   `_pendingRefreshes` Map: concurrent calls for the same model coalesce
   into a single fetch.
 
+### Fixes & Hardening
+
+#### Security
+
+- **Gateway auth** — use `crypto.timingSafeEqual` for API key comparison
+  instead of string equality (constant-time, prevents timing attacks)
+- **Gateway server** — add 10 MB request body size limit to prevent
+  memory exhaustion DoS
+- **Google adapter** — move API key from URL query parameter to
+  `x-goog-api-key` header (prevents key leaking in server logs and
+  browser history)
+
+#### Router
+
+- **Stream usage recording** — `routeStream()` now records usage via
+  the tracker (was silently skipped, causing upload pipeline to miss
+  streaming requests)
+- **System message dedup** — when both the `system` option and the
+  messages array contain a system role, duplicates are now merged
+  instead of sent twice
+
+#### Gateway server
+
+- **SSE error propagation** — send error SSE event on mid-stream
+  upstream failure instead of silent truncation
+- **Translate non-text blocks** — pass through non-text content blocks
+  in protocol translation instead of dropping them
+- **Health tracker eviction** — add TTL eviction for `_modelState` map
+  entries to prevent unbounded memory growth on long-running gateways
+
+#### Pricing
+
+- **Atomic cache writes** — use write-to-tmp + `rename()` for
+  `pricing-cache.json` to prevent corruption on concurrent access
+- **Refresh deduplication** — concurrent `getPricing()` calls for the
+  same model coalesce into a single fetch via `_pendingRefreshes` Map
+
+#### API client
+
+- **`StatusAPI.model()`** — `encodeURI` → `encodeURIComponent` for model
+  ID path parameter (fixes lookup for IDs containing `/` or `#`)
+
+#### Build
+
+- **VERSION constant** — extracted to `src/version.ts` module; `index.ts`
+  re-exports via `export { VERSION }` instead of inlining the string
+- **ESM import** — use static `import yaml from "yaml"` instead of
+  CJS `require()` for config module
+- **CI** — switch npm publish to trusted publishing (OIDC), fix auth
+  token and environment config
+
+#### Tests
+
+- Updated test suites: `pricing.test.mjs` (cache-aware pricing),
+  `router-advanced.test.mjs` (usage recording paths),
+  `server.test.mjs` (body limit, auth, SSE error),
+  `status-api.test.mjs` (encodeURIComponent),
+  `translate.test.mjs` (non-text passthrough),
+  `uploader.test.mjs` (guard conditions, payload shape)
+
 ### Public API
 
 New top-level exports in `aistatus`:
