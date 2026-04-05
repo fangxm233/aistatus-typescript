@@ -10,6 +10,7 @@ import "./providers/google";
 import "./providers/compatible";
 
 import { Router } from "./router";
+import { VERSION } from "./version";
 
 export { StatusAPI } from "./api";
 export {
@@ -58,7 +59,7 @@ export { UsageUploader } from "./uploader";
 export { CostCalculator } from "./pricing";
 export type { Middleware, BeforeRequestContext, AfterResponseContext } from "./middleware";
 
-export const VERSION = "0.0.4";
+export { VERSION } from "./version";
 
 let defaultRouter: Router | null = null;
 

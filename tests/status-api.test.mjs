@@ -80,3 +80,34 @@ test("StatusAPI normalizes provider aliases from provider lists", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("StatusAPI.model encodes provider/model IDs as a single path segment", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = "";
+
+  globalThis.fetch = async (input) => {
+    requestedUrl = String(input);
+    return new Response(
+      JSON.stringify({
+        id: "openai/gpt-4o",
+        name: "GPT-4o",
+        provider: "openai",
+        context_length: 128000,
+        modality: "text",
+        pricing: { prompt: 0.000005, completion: 0.000015 },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  };
+
+  try {
+    const api = new StatusAPI("https://aistatus.cc");
+    await api.model("openai/gpt-4o");
+    assert.ok(requestedUrl.includes("/api/models/openai%2Fgpt-4o"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

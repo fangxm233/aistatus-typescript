@@ -114,29 +114,35 @@ test("UsageUploader skips upload when config is not eligible", async () => {
   }
 });
 
-test("UsageUploader swallows fetch rejections", async () => {
+test("UsageUploader truncates identity fields to backend-safe limits", async () => {
+  const calls = [];
   const savedFetch = globalThis.fetch;
 
-  globalThis.fetch = () => Promise.reject(new Error("network down"));
+  globalThis.fetch = (input, init) => {
+    calls.push({ input, init });
+    return Promise.resolve(new Response(null, { status: 204 }));
+  };
 
   try {
-    const { UsageUploader } = await import(`../dist/index.js?reject=${Date.now()}`);
+    const { UsageUploader } = await import(`../dist/index.js?truncate=${Date.now()}`);
+
     const uploader = new UsageUploader({
-      name: "Test User",
-      org: null,
-      email: "test@example.com",
+      name: "n".repeat(250),
+      org: "o".repeat(250),
+      email: `${"e".repeat(250)}@example.com`,
       uploadEnabled: true,
     });
 
-    assert.doesNotThrow(() => {
-      uploader.upload({
-        ts: "2026-04-03T12:34:56.000Z",
-        provider: "anthropic",
-        model: "claude-sonnet-4-6",
-      });
+    uploader.upload({
+      ts: "2026-04-03T12:34:56.000Z",
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
     });
 
-    await new Promise((resolve) => setImmediate(resolve));
+    const payload = JSON.parse(calls[0].init.body);
+    assert.equal(payload.records[0].name.length, 200);
+    assert.equal(payload.records[0].organization.length, 200);
+    assert.equal(payload.records[0].email.length, 254);
   } finally {
     globalThis.fetch = savedFetch;
   }

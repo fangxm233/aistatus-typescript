@@ -17,12 +17,23 @@ interface AnthropicResponse {
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
   };
+}
+
+interface AnthropicClient {
+  messages(
+    payload: Record<string, unknown>,
+    options: { timeoutMs: number; signal?: AbortSignal; headers?: Record<string, string> },
+  ): Promise<AnthropicResponse>;
 }
 
 export class AnthropicAdapter extends ProviderAdapter {
   private readonly defaultBaseUrl = "https://api.anthropic.com/v1";
   private readonly defaultEnvVar = "ANTHROPIC_API_KEY";
+  private _client: AnthropicClient | null = null;
+  private _clientKey = "";
 
   async call(
     modelId: string,
@@ -76,23 +87,21 @@ export class AnthropicAdapter extends ProviderAdapter {
       payload.top_p = options.topP;
     }
 
-    const response = await fetchJson<AnthropicResponse>(
-      joinUrl(this.config.baseUrl ?? this.defaultBaseUrl, "messages"),
+    const apiKey = requireApiKey(
+      this.slug,
+      this.config.apiKey ?? readEnv(this.config.env ?? this.defaultEnvVar),
+      this.config.env ?? this.defaultEnvVar,
+    );
+    const response = await this.getClient(apiKey).messages(
+      payload,
       {
-        method: "POST",
+        timeoutMs: timeoutSeconds * 1_000,
+        signal: options.signal,
         headers: {
-          "x-api-key": requireApiKey(
-            this.slug,
-            this.config.apiKey ?? readEnv(this.config.env ?? this.defaultEnvVar),
-            this.config.env ?? this.defaultEnvVar,
-          ),
           "anthropic-version": "2023-06-01",
           ...(this.config.headers ?? {}),
           ...(options.headers ?? {}),
         },
-        body: payload,
-        timeoutMs: timeoutSeconds * 1_000,
-        signal: options.signal,
       },
     );
 
@@ -106,8 +115,34 @@ export class AnthropicAdapter extends ProviderAdapter {
       wasFallback: false,
       inputTokens: response.usage?.input_tokens ?? 0,
       outputTokens: response.usage?.output_tokens ?? 0,
+      cacheCreationInputTokens: response.usage?.cache_creation_input_tokens ?? 0,
+      cacheReadInputTokens: response.usage?.cache_read_input_tokens ?? 0,
       raw: response,
     });
+  }
+
+  private getClient(apiKey: string): AnthropicClient {
+    const baseUrl = this.config.baseUrl ?? this.defaultBaseUrl;
+    const cacheKey = `${baseUrl}::${apiKey}`;
+    if (this._client && this._clientKey === cacheKey) {
+      return this._client;
+    }
+
+    this._clientKey = cacheKey;
+    this._client = {
+      messages: (payload, options) =>
+        fetchJson<AnthropicResponse>(joinUrl(baseUrl, "messages"), {
+          method: "POST",
+          headers: {
+            "x-api-key": apiKey,
+            ...(options.headers ?? {}),
+          },
+          body: payload,
+          timeoutMs: options.timeoutMs,
+          signal: options.signal,
+        }),
+    };
+    return this._client;
   }
 }
 

@@ -8,6 +8,13 @@ import type {
 import { RouteResponse } from "../models";
 import { ProviderAdapter, registerAdapterType } from "./base";
 
+interface OpenAIClient {
+  chatCompletions(
+    payload: Record<string, unknown>,
+    options: { timeoutMs: number; signal?: AbortSignal; headers?: Record<string, string> },
+  ): Promise<OpenAIResponse>;
+}
+
 interface OpenAIResponse {
   choices?: Array<{
     message?: {
@@ -23,6 +30,8 @@ interface OpenAIResponse {
 export class OpenAIAdapter extends ProviderAdapter {
   protected defaultBaseUrl = "https://api.openai.com/v1";
   protected defaultEnvVar = "OPENAI_API_KEY";
+  private _client: OpenAIClient | null = null;
+  private _clientKey = "";
 
   protected getBaseUrl(): string {
     return this.config.baseUrl ?? this.defaultBaseUrl;
@@ -89,23 +98,45 @@ export class OpenAIAdapter extends ProviderAdapter {
     timeoutSeconds: number,
     options: ProviderCallOptions,
   ): Promise<RouteResponseShape> {
-    const response = await fetchJson<OpenAIResponse>(
-      joinUrl(this.getBaseUrl(), "chat/completions"),
+    const apiKey = this.getApiKey();
+    const client = this.getClient(apiKey);
+    const response = await client.chatCompletions(
+      this.buildPayload(modelId, messages, options),
       {
-        method: "POST",
+        timeoutMs: timeoutSeconds * 1_000,
+        signal: options.signal,
         headers: {
-          authorization: `Bearer ${this.getApiKey()}`,
           ...this.getDefaultHeaders(),
           ...(this.config.headers ?? {}),
           ...(options.headers ?? {}),
         },
-        body: this.buildPayload(modelId, messages, options),
-        timeoutMs: timeoutSeconds * 1_000,
-        signal: options.signal,
       },
     );
 
     return this.toResponse(response, modelId);
+  }
+
+  protected getClient(apiKey = this.getApiKey()): OpenAIClient {
+    const cacheKey = `${this.getBaseUrl()}::${apiKey}`;
+    if (this._client && this._clientKey === cacheKey) {
+      return this._client;
+    }
+
+    this._clientKey = cacheKey;
+    this._client = {
+      chatCompletions: (payload, options) =>
+        fetchJson<OpenAIResponse>(joinUrl(this.getBaseUrl(), "chat/completions"), {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${apiKey}`,
+            ...(options.headers ?? {}),
+          },
+          body: payload,
+          timeoutMs: options.timeoutMs,
+          signal: options.signal,
+        }),
+    };
+    return this._client;
   }
 
   protected toResponse(

@@ -2,14 +2,181 @@
 
 ## 0.0.4 — 2026-04-04
 
-### Added
+Opt-in usage upload pipeline and cache-aware pricing for the leaderboard flow.
 
-- Persistent usage-upload configuration helpers backed by `~/.aistatus/config.yaml`
-  with `configure() > env vars > config file > defaults` precedence
-- Fire-and-forget `UsageUploader` that POSTs usage records to
-  `https://aistatus.cc/api/usage/upload` and swallows network failures
-- Leaderboard support in the SDK usage pipeline: routers and gateway usage
-  tracking now forward uploaded records with user identity metadata
+### New Modules
+
+#### `config` — persistent upload configuration
+
+Manages SDK-wide upload identity, backed by `~/.aistatus/config.yaml`.
+
+- **`AIStatusConfig` interface** — four fields:
+  - `name: string | null` — user or organization display name
+  - `org: string | null` — organization identifier
+  - `email: string | null` — contact email for the upload identity
+  - `uploadEnabled: boolean` — master switch for usage uploads
+- **`getConfig(options?: ConfigOptions) → AIStatusConfig`** — returns the
+  merged config. Resolution order:
+  1. Runtime overrides (set via `configure()`)
+  2. Environment variables
+  3. YAML file at `~/.aistatus/config.yaml`
+  4. Defaults (all null/false)
+
+  `ConfigOptions` allows injecting custom `env`, `filePath`, or
+  `skipFile: true` for testing.
+- **`configure(config: Partial<AIStatusConfig> | null) → AIStatusConfig`** —
+  stores in-memory overrides and returns the resolved config. Pass `null`
+  to clear overrides.
+- **`loadFromFile(filePath?) → Partial<AIStatusConfig>`** — reads and parses
+  the YAML file. Supports both camelCase (`uploadEnabled`) and snake_case
+  (`upload_enabled`) keys.
+- **`saveToFile(config, filePath?)`** — writes the config to YAML. Creates
+  parent directories as needed.
+- **Environment variables**:
+  | Variable | Maps to | Type |
+  |---|---|---|
+  | `AISTATUS_UPLOAD_ENABLED` | `uploadEnabled` | bool |
+  | `AISTATUS_NAME` | `name` | str |
+  | `AISTATUS_ORG` | `org` | str |
+  | `AISTATUS_EMAIL` | `email` | str |
+- **Boolean normalization**: string values `"1"`, `"true"`, `"yes"`, `"on"`
+  → `true`; `"0"`, `"false"`, `"no"`, `"off"` → `false`. Applies to both
+  env vars and YAML values.
+- Internal helpers: `mergeConfig()` uses `coalesce()` for strings (first
+  non-`undefined` wins) and `coalesceBoolean()` for booleans.
+
+#### `uploader` — fire-and-forget usage upload
+
+Bridges local usage tracking to the remote leaderboard API.
+
+- **`UsageUploader` class**:
+  - Constructor takes `AIStatusConfig` and optional `baseUrl`
+    (default `https://aistatus.cc`).
+  - **`upload(record: UsageRecord)`** — the only public method:
+    1. Guards: returns immediately if `uploadEnabled`, `name`, or `email`
+       are falsy
+    2. Builds a `UsageUploadPayload`:
+       - Maps short keys to full names: `in` → `input_tokens`,
+         `out` → `output_tokens`, `cache_creation_in` →
+         `cache_creation_input_tokens`, `cache_read_in` →
+         `cache_read_input_tokens`
+       - Includes identity fields (`name`, `organization`, `email`),
+         metric fields (`cost_usd`, `latency_ms`), and `sdk_version`
+         (from `VERSION` constant)
+    3. Fires `fetch()` POST to `{baseUrl}/api/usage/upload` with
+       `Content-Type: application/json`. The returned promise is
+       **voided** (`.catch(() => {})`) — never blocks, never throws.
+- **Type definitions**:
+  - `UsageRecord` — input shape: `{ ts, provider, model, in?, out?,
+    cache_creation_in?, cache_read_in?, cost?, latency_ms? }`
+  - `UsageUploadRecord` — wire format: full field names + identity fields
+  - `UsageUploadPayload` — `{ records: [UsageUploadRecord], sdk_version }`
+- **`UsageUploadTarget` interface** (in `usage.ts`) — `{ upload(record): void }`
+  structural typing so `UsageTracker` doesn't depend directly on `UsageUploader`.
+
+### Enhanced
+
+#### Usage tracking pipeline
+
+- **`UsageTracker` constructor** — new optional second parameter
+  `uploader?: UsageUploadTarget | null`. When set, `recordUsage()` calls
+  `this.uploader?.upload(record)` after appending to local JSONL storage.
+- **`UsageTracker.recordUsage()`** — new optional fields in the options
+  object:
+  - `cache_creation_input_tokens?: number`
+  - `cache_read_input_tokens?: number`
+  - `billing_mode?: string`
+
+  Cache token keys are included conditionally (only when non-zero).
+
+#### Usage storage
+
+- **`UsageStorage`** — project-scoped persistence:
+  - Directory: `~/.aistatus/usage/projects/{cwdHash}/` where `cwdHash` is
+    the first 12 chars of `SHA-256(process.cwd())`
+  - Files: `YYYY-MM.jsonl` (one per calendar month)
+  - `manifest.json` — records the original `cwd` path and creation
+    timestamp, written once on first access
+  - **`exportJson(payload, outputPath)`** — new method for generic JSON
+    export alongside existing `exportCsv()`
+
+#### Router & Gateway wiring
+
+- **`Router` constructor** — now constructs:
+  ```typescript
+  this.usage = new UsageTracker(undefined, new UsageUploader(getConfig()));
+  ```
+  New private `recordUsage()` method invoked on **all four route paths**:
+  1. `routeModel()` — main success path
+  2. `routeModel()` — 429 retry path
+  3. `routeStream()` — streaming (collects usage from stream chunks)
+  4. `routeStream()` — non-streaming fallback after stream collection
+
+  Each call captures `provider`, `model`, `inputTokens`, `outputTokens`,
+  `cacheCreationInputTokens`, `cacheReadInputTokens`, `latencyMs`,
+  `wasFallback`, and calculated cost.
+
+- **`GatewayServer` constructor** — same pattern:
+  ```typescript
+  this.usage = new UsageTracker(undefined, new UsageUploader(getConfig()));
+  ```
+  Gateway usage recording now forwards cache token fields through to the
+  uploader.
+
+#### Cache-aware pricing
+
+- **`CostCalculator.calculateCostWithCache()`** — new method:
+  ```typescript
+  calculateCostWithCache(
+    provider, model,
+    inputTokens, outputTokens,
+    cacheCreationInputTokens,
+    cacheReadInputTokens,
+  ): number
+  ```
+  Cost formula:
+  - Base input: `inputTokens × input_per_million`
+  - Cache creation: `cacheCreationInputTokens × writePrice`
+    (fetched from API; fallback **1.25×** input price)
+  - Cache read: `cacheReadInputTokens × readPrice`
+    (fetched from API; fallback **0.10×** input price)
+  - Output: `outputTokens × output_per_million`
+
+- **`PricingInfo` interface** — now includes `input_cache_read_per_million`
+  and `input_cache_write_per_million` (nullable). Populated from the
+  `input_cache_read` and `input_cache_write` fields in the aistatus.cc API
+  response.
+
+- **`_refreshPricing()`** — async refresh with deduplication via
+  `_pendingRefreshes` Map: concurrent calls for the same model coalesce
+  into a single fetch.
+
+### Public API
+
+New top-level exports in `aistatus`:
+
+```typescript
+export { UsageUploader } from "./uploader";
+export { configure, getConfig, loadFromFile, saveToFile } from "./config";
+export type { AIStatusConfig } from "./config";
+```
+
+### Dependencies
+
+- Added `yaml ^2.8.3` for YAML config file parsing/writing
+
+### User Flow
+
+```typescript
+import { configure, route } from "aistatus";
+
+// One-time setup (persisted to ~/.aistatus/config.yaml)
+configure({ name: "Alice", email: "alice@example.com", uploadEnabled: true });
+
+// Every route() call now uploads usage in the background
+const resp = await route("Hello", { model: "claude-sonnet-4-6" });
+// → usage record POSTed to aistatus.cc/api/usage/upload (async, silent)
+```
 
 ## 0.0.3 — 2026-03-23
 

@@ -52,7 +52,7 @@ export class StatusAPI {
 
   async model(modelId: string): Promise<ModelInfo | null> {
     try {
-      const data = await this.get(`/api/models/${encodeURI(modelId)}`);
+      const data = await this.get(`/api/models/${encodeURIComponent(modelId)}`);
       return this.parseModel(data);
     } catch (error) {
       if (error instanceof HTTPStatusError && error.status === 404) {

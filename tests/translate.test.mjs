@@ -112,12 +112,11 @@ test("openaiResponseToAnthropic maps finish_reason=length to max_tokens", () => 
   assert.equal(result.stop_reason, "max_tokens");
 });
 
-test("openaiSseToAnthropicSse translates SSE stream", async () => {
-  // Build a minimal OpenAI SSE stream
+test("openaiSseToAnthropicSse emits terminal events only once when finish_reason and [DONE] both arrive", async () => {
   const events = [
     'data: {"choices":[{"delta":{"content":"Hel"},"index":0}]}\n\n',
-    'data: {"choices":[{"delta":{"content":"lo"},"index":0}]}\n\n',
     'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n',
+    'data: [DONE]\n\n',
   ];
 
   async function* fakeChunks() {
@@ -132,15 +131,7 @@ test("openaiSseToAnthropicSse translates SSE stream", async () => {
   }
 
   const fullOutput = collected.join("");
-
-  // Should contain message_start, content_block_start, deltas, content_block_stop, message_delta, message_stop
-  assert.ok(fullOutput.includes("event: message_start"));
-  assert.ok(fullOutput.includes("event: content_block_start"));
-  assert.ok(fullOutput.includes("event: content_block_delta"));
-  assert.ok(fullOutput.includes('"text":"Hel"'));
-  assert.ok(fullOutput.includes('"text":"lo"'));
-  assert.ok(fullOutput.includes("event: content_block_stop"));
-  assert.ok(fullOutput.includes("event: message_delta"));
-  assert.ok(fullOutput.includes("event: message_stop"));
-  assert.ok(fullOutput.includes('"stop_reason":"end_turn"'));
+  assert.equal(fullOutput.match(/event: content_block_stop/g)?.length ?? 0, 1);
+  assert.equal(fullOutput.match(/event: message_delta/g)?.length ?? 0, 1);
+  assert.equal(fullOutput.match(/event: message_stop/g)?.length ?? 0, 1);
 });

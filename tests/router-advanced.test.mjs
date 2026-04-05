@@ -99,10 +99,57 @@ class StreamingAdapter extends ProviderAdapter {
   }
 }
 
+class StreamFailThenWorkAdapter extends ProviderAdapter {
+  constructor(config) {
+    super(config);
+    this._failCount = 0;
+  }
+
+  async call(modelId) {
+    return new RouteResponse({
+      content: `fallback:${this.slug}`,
+      modelUsed: modelId,
+      providerUsed: this.slug,
+      wasFallback: false,
+    });
+  }
+
+  async *callStream(modelId) {
+    callLog.push({ slug: this.slug, modelId, ts: Date.now(), kind: "stream" });
+    if (this._failCount === 0) {
+      this._failCount++;
+      const err = new Error("HTTP 500");
+      err.status = 500;
+      throw err;
+    }
+    yield { type: "text", text: `stream:${this.slug}` };
+    yield { type: "done" };
+  }
+}
+
+class StreamTierAdapter extends ProviderAdapter {
+  async call(modelId) {
+    return new RouteResponse({
+      content: `tier-call:${modelId}`,
+      modelUsed: modelId,
+      providerUsed: this.slug,
+      wasFallback: false,
+    });
+  }
+
+  async *callStream(modelId) {
+    callLog.push({ slug: this.slug, modelId, ts: Date.now(), kind: "stream" });
+    yield { type: "text", text: `tier:${modelId}` };
+    yield { type: "done" };
+  }
+}
+
 registerAdapterType("test-counting", CountingAdapter);
 registerAdapterType("test-fail-once", FailOnceAdapter);
 registerAdapterType("test-always-fail", AlwaysFailAdapter);
 registerAdapterType("test-streaming", StreamingAdapter);
+registerAdapterType("test-stream-fail-then-work", StreamFailThenWorkAdapter);
+registerAdapterType("test-stream-tier", StreamTierAdapter);
 
 // Reset call log before each test
 test.beforeEach(() => {
@@ -304,20 +351,38 @@ test("Router.routeStream returns async iterable of chunks", async () => {
   assert.equal(usageChunks[0].cacheCreationInputTokens, 2);
 });
 
-test("Router.routeStream falls back to non-streaming adapter when callStream not available", async () => {
+test("Router.routeStream uses tier candidates when only tier is provided", async () => {
   const router = new Router({ autoDiscover: false });
-  router.registerProvider({ slug: "non-stream", adapterType: "test-counting" });
-
-  router.api.checkModel = async () =>
-    new CheckResult({ provider: "non-stream", status: Status.OPERATIONAL });
+  router.registerProvider({ slug: "anthropic", adapterType: "test-stream-tier" });
+  router.addTier("fast", ["anthropic/claude-haiku-4-5"]);
 
   const chunks = [];
-  for await (const chunk of router.routeStream("hello", { model: "m1" })) {
+  for await (const chunk of router.routeStream("hello", { tier: "fast" })) {
     chunks.push(chunk);
   }
 
-  // Should get a single text chunk with full content, then usage, then done
-  const textChunks = chunks.filter((c) => c.type === "text");
-  assert.ok(textChunks.length >= 1);
-  assert.ok(textChunks.some((c) => c.text.includes("ok:")));
+  assert.equal(chunks[0].type, "text");
+  assert.equal(chunks[0].text, "tier:anthropic/claude-haiku-4-5");
 });
+
+test("Provider adapters cache clients and rebuild when API key changes", async () => {
+  const { createAdapter } = await import(`../dist/index.js?client-cache=${Date.now()}`);
+
+  process.env.OPENAI_API_KEY = "key-one";
+  const openai = createAdapter({ slug: "openai", adapterType: "openai" });
+  const client1 = openai.getClient();
+  const client2 = openai.getClient();
+  assert.equal(client1, client2);
+
+  process.env.OPENAI_API_KEY = "key-two";
+  const client3 = openai.getClient();
+  assert.notEqual(client1, client3);
+
+  const anthropic = createAdapter({ slug: "anthropic", adapterType: "anthropic" });
+  const ant1 = anthropic.getClient("ant-one");
+  const ant2 = anthropic.getClient("ant-one");
+  assert.equal(ant1, ant2);
+  const ant3 = anthropic.getClient("ant-two");
+  assert.notEqual(ant1, ant3);
+});
+

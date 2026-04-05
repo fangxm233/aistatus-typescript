@@ -119,18 +119,46 @@ test("CostCalculator.calculateCostWithCache falls back to multipliers when cache
   assert.equal(cost, 0.0195);
 });
 
-test("CostCalculator.calculateCostWithCache equals calculateCost when no cache tokens", async () => {
+test("CostCalculator.getPricing returns cache miss immediately and refreshes asynchronously", async () => {
   const { CostCalculator } = await import("../dist/index.js");
+  const os = await import("node:os");
+  const path = await import("node:path");
 
-  const calc = new CostCalculator();
-  calc.getPricing = () => ({
-    input_per_million: 3.0,
-    output_per_million: 15.0,
-    input_cache_read_per_million: 0.3,
-    input_cache_write_per_million: 3.75,
-  });
+  const calc = new CostCalculator("https://aistatus.cc", 3600);
+  calc._cachePath = path.join(os.tmpdir(), `aistatus-pricing-${Date.now()}.json`);
+  let fetchCalls = 0;
+  const originalFetch = globalThis.fetch;
 
-  const withCache = calc.calculateCostWithCache("a", "m", 1000, 500, 0, 0);
-  const withoutCache = calc.calculateCost("a", "m", 1000, 500);
-  assert.equal(withCache, withoutCache);
+  globalThis.fetch = async () => {
+    fetchCalls++;
+    return new Response(
+      JSON.stringify({
+        models: [
+          {
+            id: "anthropic/claude-sonnet-4-6",
+            pricing: { prompt: 0.000003, completion: 0.000015 },
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+
+  try {
+    const first = calc.getPricing("anthropic", "claude-sonnet-4-6");
+    assert.equal(first, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fetchCalls, 1);
+
+    const second = calc.getPricing("anthropic", "claude-sonnet-4-6");
+    assert.deepEqual(second, {
+      input_per_million: 3,
+      output_per_million: 15,
+      input_cache_read_per_million: null,
+      input_cache_write_per_million: null,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

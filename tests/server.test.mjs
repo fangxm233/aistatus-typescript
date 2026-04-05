@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 // input: built GatewayServer class from dist and local HTTP requests against ephemeral test servers
 // output: integration regression tests for gateway health/status/usage/mode endpoints and request handling
@@ -8,6 +11,10 @@ import http from "node:http";
 // >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
 
 // Server integration test: start gateway, hit endpoints, verify responses
+
+function makeTempUsageTrackerConfig() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-server-test-"));
+}
 
 function request(port, path, options = {}) {
   return new Promise((resolve, reject) => {
@@ -33,6 +40,7 @@ function request(port, path, options = {}) {
     req.end();
   });
 }
+
 
 test("Gateway server serves /health endpoint", async () => {
   const { GatewayServer } = await import("../dist/gateway/index.js");
@@ -266,6 +274,64 @@ test("Gateway server supports POST /mode and records mode in health/status", asy
   }
 });
 
+test("Gateway server paginates /usage?format=records with limit and offset", async () => {
+  const { GatewayServer } = await import("../dist/gateway/index.js");
+  const { UsageTracker, UsageStorage } = await import("../dist/index.js");
+
+  const config = {
+    host: "127.0.0.1",
+    port: 0,
+    status_check: false,
+    endpoints: {
+      openai: {
+        name: "openai",
+        base_url: "https://api.openai.com",
+        auth_style: "bearer",
+        keys: [],
+        passthrough: true,
+        fallbacks: [],
+        model_fallbacks: {},
+      },
+    },
+  };
+
+  const freePort = await new Promise((resolve) => {
+    const s = http.createServer();
+    s.listen(0, () => {
+      const port = s.address().port;
+      s.close(() => resolve(port));
+    });
+  });
+
+  config.port = freePort;
+  const server = new GatewayServer(config);
+  const tmpDir = makeTempUsageTrackerConfig();
+  server.usage = new UsageTracker(new UsageStorage(tmpDir, `/test/server-paginate-${Date.now()}`));
+  server.usage.recordUsage({ provider: "openai", model: "m1", input_tokens: 1, output_tokens: 1, latency_ms: 1, fallback: false });
+  server.usage.recordUsage({ provider: "openai", model: "m2", input_tokens: 2, output_tokens: 2, latency_ms: 2, fallback: false });
+  server.usage.recordUsage({ provider: "openai", model: "m3", input_tokens: 3, output_tokens: 3, latency_ms: 3, fallback: false });
+
+  const httpServer = http.createServer((req, res) => {
+    server._handleRequest(req, res).catch(() => {
+      if (!res.headersSent) {
+        res.writeHead(500);
+        res.end();
+      }
+    });
+  });
+
+  await new Promise((resolve) => httpServer.listen(freePort, "127.0.0.1", resolve));
+
+  try {
+    const paged = JSON.parse((await request(freePort, "/usage?format=records&limit=2&offset=1")).body);
+    assert.equal(paged.records.length, 2);
+    assert.equal(paged.records[0].model, "m2");
+    assert.equal(paged.records[1].model, "m3");
+  } finally {
+    httpServer.close();
+  }
+});
+
 test("Gateway server uploads usage records after a successful proxied request", async () => {
   const { GatewayServer } = await import(`../dist/gateway/index.js?server-upload=${Date.now()}`);
   const { configure } = await import(`../dist/index.js?server-upload=${Date.now()}`);
@@ -351,6 +417,106 @@ test("Gateway server uploads usage records after a successful proxied request", 
     assert.equal(payload.records[0].model, "claude-sonnet-4-6");
     assert.equal(payload.records[0].input_tokens, 12);
     assert.equal(payload.records[0].output_tokens, 34);
+  } finally {
+    globalThis.fetch = savedFetch;
+    httpServer.close();
+  }
+});
+
+test("Gateway server records usage for translated streaming responses", async () => {
+  const { GatewayServer } = await import(`../dist/gateway/index.js?server-translate=${Date.now()}`);
+  const { configure, UsageTracker, UsageStorage } = await import(`../dist/index.js?server-translate=${Date.now()}`);
+
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    if (String(input) === "https://aistatus.cc/api/usage/upload") {
+      return new Response(null, { status: 204 });
+    }
+
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(Buffer.from('data: {"choices":[{"delta":{"content":"hi"},"index":0}]}\n\n'));
+        controller.enqueue(Buffer.from('data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":8,"completion_tokens":5}}\n\n'));
+        controller.enqueue(Buffer.from('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+
+  configure({
+    name: "Gateway User",
+    org: "Gateway Org",
+    email: "gateway@example.com",
+    uploadEnabled: true,
+  });
+
+  const config = {
+    host: "127.0.0.1",
+    port: 0,
+    status_check: false,
+    endpoints: {
+      anthropic: {
+        name: "anthropic",
+        base_url: "https://example.com/v1",
+        auth_style: "anthropic",
+        keys: [],
+        passthrough: false,
+        fallbacks: [
+          {
+            name: "openai-fallback",
+            base_url: "https://example.com/v1",
+            api_key: "sk-openai",
+            auth_style: "bearer",
+            model_prefix: "",
+            model_map: {},
+            translate: "anthropic-to-openai",
+          },
+        ],
+        model_fallbacks: {},
+      },
+    },
+  };
+
+  const freePort = await new Promise((resolve) => {
+    const s = http.createServer();
+    s.listen(0, () => {
+      const port = s.address().port;
+      s.close(() => resolve(port));
+    });
+  });
+
+  config.port = freePort;
+  const server = new GatewayServer(config);
+  const tmpDir = makeTempUsageTrackerConfig();
+  server.usage = new UsageTracker(new UsageStorage(tmpDir, `/test/server-translate-${Date.now()}`));
+  const httpServer = http.createServer((req, res) => {
+    server._handleRequest(req, res).catch(() => {
+      if (!res.headersSent) {
+        res.writeHead(500);
+        res.end();
+      }
+    });
+  });
+
+  await new Promise((resolve) => httpServer.listen(freePort, "127.0.0.1", resolve));
+
+  try {
+    const res = await request(freePort, "/anthropic/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [], stream: true }),
+    });
+
+    assert.equal(res.status, 200);
+    const records = server.usage.storage.read("all");
+    assert.equal(records.length, 1);
+    assert.equal(records[0].in, 8);
+    assert.equal(records[0].out, 5);
   } finally {
     globalThis.fetch = savedFetch;
     httpServer.close();
