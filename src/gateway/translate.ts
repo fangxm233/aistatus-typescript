@@ -40,6 +40,9 @@ export function anthropicRequestToOpenai(body: Buffer): Buffer {
         .map((b: Record<string, unknown>) => (b.text as string) ?? "");
       if (texts.length > 0) {
         messages.push({ role, content: texts.join("\n") });
+      } else {
+        // Non-text-only messages (tool_use, images, etc.): pass through as-is with stringified content
+        messages.push({ role, content: JSON.stringify(content) });
       }
     }
   }
@@ -143,6 +146,7 @@ export async function* openaiSseToAnthropicSse(
 
   let outputTokens = 0;
   let buffer = "";
+  let finished = false;
 
   for await (const rawChunk of chunks) {
     buffer += rawChunk.toString("utf-8");
@@ -161,6 +165,8 @@ export async function* openaiSseToAnthropicSse(
         const payload = line.slice(5).trim();
 
         if (payload === "[DONE]") {
+          if (finished) return;
+          finished = true;
           yield sseEvent("content_block_stop", {
             type: "content_block_stop",
             index: 0,
@@ -202,6 +208,8 @@ export async function* openaiSseToAnthropicSse(
 
         // Check finish_reason
         if (choices[0].finish_reason) {
+          if (finished) return;
+          finished = true;
           yield sseEvent("content_block_stop", {
             type: "content_block_stop",
             index: 0,

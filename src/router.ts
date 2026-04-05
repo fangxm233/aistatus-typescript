@@ -138,34 +138,69 @@ export class Router {
       throw new Error("Either 'model' or 'tier' must be specified");
     }
 
-    const model = options.model as string;
-    const candidates = await this.resolveModel(model, options.prefer);
+    const candidates = options.tier
+      ? await this.resolveTier(options.tier, options.prefer)
+      : await this.resolveModel(options.model as string, options.prefer);
 
     if (candidates.length === 0) {
-      throw new AllProvidersDown([`no adapter for model '${model}'`]);
+      const target = options.tier ? `tier '${options.tier}'` : `model '${options.model}'`;
+      throw new AllProvidersDown([`no adapter for ${target}`]);
     }
+
+    const first = candidates[0];
 
     for (const candidate of candidates) {
       const adapter = this.adapters.get(candidate.adapterKey);
       if (!adapter) continue;
 
-      // Skip unhealthy providers
       if (this.health && !this.health.isHealthy(candidate.providerSlug)) continue;
+      const t0 = Date.now();
+      const isFallback = candidate.providerSlug !== first.providerSlug || candidate.modelId !== first.modelId;
 
       try {
         if (adapter.callStream) {
-          // Use native streaming
-          yield* adapter.callStream(
+          // Collect usage from stream chunks for recording
+          const streamUsage = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+          for await (const chunk of adapter.callStream(
             candidate.modelId,
             normalizedMessages,
             options.timeout ?? 30,
             callOptions,
-          );
+          )) {
+            if (chunk.type === "usage") {
+              streamUsage.inputTokens = chunk.inputTokens ?? 0;
+              streamUsage.outputTokens = chunk.outputTokens ?? 0;
+              streamUsage.cacheCreationInputTokens = chunk.cacheCreationInputTokens ?? 0;
+              streamUsage.cacheReadInputTokens = chunk.cacheReadInputTokens ?? 0;
+            }
+            yield chunk;
+          }
           if (this.health) this.health.recordSuccess(candidate.providerSlug);
+
+          // Record usage from streaming
+          if (streamUsage.inputTokens > 0 || streamUsage.outputTokens > 0) {
+            const modelUsed = candidate.modelId.includes("/")
+              ? candidate.modelId
+              : `${candidate.providerSlug}/${candidate.modelId}`;
+            const latencyMs = Date.now() - t0;
+            const cost = (streamUsage.cacheCreationInputTokens > 0 || streamUsage.cacheReadInputTokens > 0)
+              ? this.pricing.calculateCostWithCache(candidate.providerSlug, modelUsed, streamUsage.inputTokens, streamUsage.outputTokens, streamUsage.cacheCreationInputTokens, streamUsage.cacheReadInputTokens)
+              : this.pricing.calculateCost(candidate.providerSlug, modelUsed, streamUsage.inputTokens, streamUsage.outputTokens);
+            this.usage.recordUsage({
+              provider: candidate.providerSlug,
+              model: modelUsed,
+              input_tokens: streamUsage.inputTokens,
+              output_tokens: streamUsage.outputTokens,
+              cache_creation_input_tokens: streamUsage.cacheCreationInputTokens,
+              cache_read_input_tokens: streamUsage.cacheReadInputTokens,
+              latency_ms: latencyMs,
+              fallback: isFallback,
+              cost,
+            });
+          }
           return;
         }
 
-        // Fallback: call() then emit as chunks
         const response = await adapter.call(
           candidate.modelId,
           normalizedMessages,
@@ -173,6 +208,23 @@ export class Router {
           callOptions,
         );
         if (this.health) this.health.recordSuccess(candidate.providerSlug);
+
+        // Record usage for non-streaming fallback path
+        const modelUsed = response.modelUsed.includes("/")
+          ? response.modelUsed
+          : `${candidate.providerSlug}/${response.modelUsed}`;
+        const routeResponse = new RouteResponse({
+          content: response.content,
+          modelUsed,
+          providerUsed: candidate.providerSlug,
+          wasFallback: isFallback,
+          inputTokens: response.inputTokens,
+          outputTokens: response.outputTokens,
+          cacheCreationInputTokens: response.cacheCreationInputTokens,
+          cacheReadInputTokens: response.cacheReadInputTokens,
+          raw: response.raw,
+        });
+        this.recordUsage(routeResponse, candidate.providerSlug, Date.now() - t0, isFallback);
 
         yield { type: "text", text: response.content };
         yield {
@@ -196,10 +248,11 @@ export class Router {
           };
           return;
         }
+        continue;
       }
     }
 
-    throw new AllProvidersDown([`no streaming adapter for model '${model}'`]);
+    throw new AllProvidersDown([`${first.providerSlug}:${first.modelId}`]);
   }
 
   async routeStreamCallbacks(
@@ -279,7 +332,15 @@ export class Router {
       : [...messages];
 
     if (system) {
-      normalized.unshift({ role: "system", content: system });
+      // Avoid duplicate system messages: if first message is already system, prepend to its content
+      if (normalized.length > 0 && normalized[0].role === "system") {
+        const existing = typeof normalized[0].content === "string"
+          ? normalized[0].content
+          : String(normalized[0].content);
+        normalized[0] = { role: "system", content: `${system}\n\n${existing}` };
+      } else {
+        normalized.unshift({ role: "system", content: system });
+      }
     }
 
     return normalized;
@@ -398,6 +459,25 @@ export class Router {
       return preferenceScore(left, preferOrder) - preferenceScore(right, preferOrder);
     });
 
+    return dedupeCandidates(resolved);
+  }
+
+  private async resolveTier(
+    tier: string,
+    prefer?: string[],
+  ): Promise<ResolvedCandidate[]> {
+    const models = this.tiers.get(tier);
+
+    if (!models) {
+      throw new Error(
+        `Tier '${tier}' not configured. Use router.addTier('${tier}', ['model-a']) first.`,
+      );
+    }
+
+    const resolved: ResolvedCandidate[] = [];
+    for (const model of models) {
+      resolved.push(...await this.resolveModel(model, prefer));
+    }
     return dedupeCandidates(resolved);
   }
 

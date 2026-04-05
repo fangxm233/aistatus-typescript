@@ -40,6 +40,9 @@ function now(): number {
   return Date.now() / 1000;
 }
 
+/** Max entries in _modelState before eviction */
+const MAX_MODEL_STATE_ENTRIES = 500;
+
 export class HealthTracker {
   private _state = new Map<string, BackendState>();
   private _modelState = new Map<string, BackendState>();
@@ -51,6 +54,10 @@ export class HealthTracker {
       if (!s) {
         s = createState();
         this._modelState.set(key, s);
+        // Evict stale entries when map grows too large
+        if (this._modelState.size > MAX_MODEL_STATE_ENTRIES) {
+          this._evictModelState();
+        }
       }
       return s;
     }
@@ -60,6 +67,17 @@ export class HealthTracker {
       this._state.set(backendId, s);
     }
     return s;
+  }
+
+  private _evictModelState(): void {
+    const cutoff = now() - WINDOW_SIZE * 2;
+    for (const [key, s] of this._modelState) {
+      // Remove entries with no recent activity
+      const lastActivity = s.errors.length > 0 ? s.errors[s.errors.length - 1] : 0;
+      if (lastActivity < cutoff && s.cooldownUntil < now()) {
+        this._modelState.delete(key);
+      }
+    }
   }
 
   isHealthy(backendId: string, model?: string): boolean {

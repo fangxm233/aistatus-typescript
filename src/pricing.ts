@@ -5,7 +5,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { execFileSync } from "node:child_process";
 
 const BASE_URL = "https://aistatus.cc";
 const CACHE_TTL_SECONDS = 3600;
@@ -27,6 +26,7 @@ export class CostCalculator {
   private _ttlSeconds: number;
   private _memoryCache = new Map<string, CacheEntry>();
   private _cachePath: string;
+  private _pendingRefreshes = new Map<string, Promise<void>>();
 
   constructor(baseUrl = BASE_URL, ttlSeconds = CACHE_TTL_SECONDS) {
     this._baseUrl = baseUrl.replace(/\/+$/, "");
@@ -85,13 +85,11 @@ export class CostCalculator {
     const cacheKey = this._normalizeKey(provider, model);
     const now = Date.now() / 1000;
 
-    // Check memory cache
     const memEntry = this._memoryCache.get(cacheKey);
     if (memEntry && this._isFresh(memEntry, now)) {
       return memEntry.pricing;
     }
 
-    // Check file cache
     const fileCache = this._readFileCache();
     const fileEntry = fileCache[cacheKey];
     if (fileEntry && this._isFresh(fileEntry, now)) {
@@ -99,18 +97,36 @@ export class CostCalculator {
       return fileEntry.pricing;
     }
 
-    // Fetch from API (synchronous http — same approach as Python SDK)
-    const pricing = this._fetchPricing(provider, model);
-    if (pricing == null) return null;
-
-    const entry: CacheEntry = { ts: now, pricing };
-    this._memoryCache.set(cacheKey, entry);
-    fileCache[cacheKey] = entry;
-    this._writeFileCache(fileCache);
-    return pricing;
+    this._refreshPricing(cacheKey, provider, model, fileCache);
+    return null;
   }
 
-  private _fetchPricing(provider: string, model: string): PricingInfo | null {
+  private _refreshPricing(
+    cacheKey: string,
+    provider: string,
+    model: string,
+    fileCache: Record<string, CacheEntry>,
+  ): void {
+    if (this._pendingRefreshes.has(cacheKey)) {
+      return;
+    }
+
+    const refresh = (async () => {
+      const pricing = await this._fetchPricing(provider, model);
+      if (pricing == null) return;
+
+      const entry: CacheEntry = { ts: Date.now() / 1000, pricing };
+      this._memoryCache.set(cacheKey, entry);
+      fileCache[cacheKey] = entry;
+      this._writeFileCache(fileCache);
+    })().finally(() => {
+      this._pendingRefreshes.delete(cacheKey);
+    });
+
+    this._pendingRefreshes.set(cacheKey, refresh);
+  }
+
+  private async _fetchPricing(provider: string, model: string): Promise<PricingInfo | null> {
     const [providerSlug, modelName] = this._splitModel(provider, model);
     const queries = this._candidateQueries(modelName);
 
@@ -118,13 +134,10 @@ export class CostCalculator {
 
     for (const query of queries) {
       try {
-        // Synchronous fetch using child_process
         const url = `${this._baseUrl}/api/models?q=${encodeURIComponent(query)}`;
-        const result = execFileSync("node", [
-          "-e",
-          `fetch(${JSON.stringify(url)},{signal:AbortSignal.timeout(3000)}).then(r=>r.json()).then(d=>process.stdout.write(JSON.stringify(d))).catch(()=>process.stdout.write("{}"))`,
-        ], { timeout: 5000, encoding: "utf-8" });
-        const data = JSON.parse(result);
+        const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+        if (!response.ok) continue;
+        const data = await response.json() as { models?: Array<Record<string, unknown>> };
         models = data.models ?? [];
         if (models.length > 0) break;
       } catch {
@@ -183,7 +196,9 @@ export class CostCalculator {
   private _writeFileCache(cache: Record<string, CacheEntry>): void {
     const dir = path.dirname(this._cachePath);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(this._cachePath, JSON.stringify(cache, null, 2), "utf-8");
+    const tmp = `${this._cachePath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(cache, null, 2), "utf-8");
+    fs.renameSync(tmp, this._cachePath);
   }
 
   private _normalizeKey(provider: string, model: string): string {

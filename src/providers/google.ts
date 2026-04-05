@@ -104,14 +104,12 @@ export class GoogleAdapter extends ProviderAdapter {
       this.config.apiKey ?? readEnv(this.config.env ?? this.defaultEnvVar),
       this.config.env ?? this.defaultEnvVar,
     );
-    const url = new URL(
-      `${this.config.baseUrl ?? this.defaultBaseUrl}/models/${modelName}:generateContent`,
-    );
-    url.searchParams.set("key", apiKey);
+    const url = `${this.config.baseUrl ?? this.defaultBaseUrl}/models/${modelName}:generateContent`;
 
-    const response = await fetchJson<GoogleResponse>(url.toString(), {
+    const response = await fetchJson<GoogleResponse>(url, {
       method: "POST",
       headers: {
+        "x-goog-api-key": apiKey,
         ...(this.config.headers ?? {}),
         ...(options.headers ?? {}),
       },

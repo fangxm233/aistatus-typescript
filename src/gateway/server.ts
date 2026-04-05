@@ -10,6 +10,8 @@
 
 import * as http from "node:http";
 import * as url from "node:url";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 import {
   type EndpointConfig,
@@ -474,44 +476,57 @@ export class GatewayServer {
           if (payload === "[DONE]") continue;
           try {
             const data = JSON.parse(payload);
-            // message_start contains input usage (including cache tokens)
             if (data.type === "message_start" && data.message?.usage) {
               const u = data.message.usage;
               streamUsage.input_tokens = asInt(u.input_tokens ?? 0);
               streamUsage.cache_creation_input_tokens = asInt(u.cache_creation_input_tokens ?? 0);
               streamUsage.cache_read_input_tokens = asInt(u.cache_read_input_tokens ?? 0);
             }
-            // message_delta contains output usage
             if (data.type === "message_delta" && data.usage) {
               streamUsage.output_tokens = asInt(data.usage.output_tokens ?? 0);
+            }
+            if (data.usage) {
+              streamUsage.input_tokens = asInt(data.usage.input_tokens ?? data.usage.prompt_tokens ?? streamUsage.input_tokens);
+              streamUsage.output_tokens = asInt(data.usage.output_tokens ?? data.usage.completion_tokens ?? streamUsage.output_tokens);
+              streamUsage.cache_creation_input_tokens = asInt(data.usage.cache_creation_input_tokens ?? streamUsage.cache_creation_input_tokens);
+              streamUsage.cache_read_input_tokens = asInt(data.usage.cache_read_input_tokens ?? streamUsage.cache_read_input_tokens);
             }
           } catch { /* ignore parse errors */ }
         }
       }
     };
 
-    if (needsTranslate) {
-      // OpenAI SSE → Anthropic SSE
-      const chunks = async function* (): AsyncGenerator<Buffer> {
+    try {
+      if (needsTranslate) {
+        const chunks = async function* (): AsyncGenerator<Buffer> {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const buf = Buffer.from(value);
+            try { parseSSEForUsage(buf.toString("utf-8")); } catch { /* ignore */ }
+            yield buf;
+          }
+        };
+
+        for await (const translated of openaiSseToAnthropicSse(chunks(), originalModel)) {
+          res.write(translated);
+        }
+      } else {
+        // Direct SSE passthrough with usage extraction
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          yield Buffer.from(value);
+          const buf = Buffer.from(value);
+          res.write(buf);
+          try { parseSSEForUsage(buf.toString("utf-8")); } catch { /* ignore */ }
         }
-      };
-
-      for await (const translated of openaiSseToAnthropicSse(chunks(), originalModel)) {
-        res.write(translated);
       }
-    } else {
-      // Direct SSE passthrough with usage extraction
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const buf = Buffer.from(value);
-        res.write(buf);
-        try { parseSSEForUsage(buf.toString("utf-8")); } catch { /* ignore */ }
-      }
+    } catch (streamErr) {
+      // Send error event to client before closing the stream
+      try {
+        const errMsg = streamErr instanceof Error ? streamErr.message : String(streamErr);
+        res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "stream_error", message: errMsg } })}\n\n`);
+      } catch { /* response may already be destroyed */ }
     }
 
     res.end();
@@ -708,7 +723,10 @@ export class GatewayServer {
           });
         }
       }
-      return jsonResponse(res, 200, { records: filtered });
+      const limit = Math.max(0, asInt(query.limit ?? 1000));
+      const offset = Math.max(0, asInt(query.offset ?? 0));
+      const paged = limit > 0 ? filtered.slice(offset, offset + limit) : filtered.slice(offset);
+      return jsonResponse(res, 200, { records: paged });
     }
 
     const period = query.period ?? "today";
@@ -811,8 +829,6 @@ export class GatewayServer {
 
   private _writePidFile(): void {
     if (!this._pidFile) return;
-    const fs = require("node:fs");
-    const path = require("node:path");
     fs.mkdirSync(path.dirname(this._pidFile), { recursive: true });
     fs.writeFileSync(this._pidFile, String(process.pid), "utf-8");
     console.log(`[gateway] PID ${process.pid} written to ${this._pidFile}`);
@@ -821,7 +837,7 @@ export class GatewayServer {
   private _removePidFile(): void {
     if (!this._pidFile) return;
     try {
-      require("node:fs").unlinkSync(this._pidFile);
+      fs.unlinkSync(this._pidFile);
       console.log(`[gateway] PID file removed: ${this._pidFile}`);
     } catch { /* ignore */ }
   }
@@ -881,10 +897,21 @@ function jsonResponse(res: http.ServerResponse, status: number, data: unknown): 
   res.end(body);
 }
 
+const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB
+
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_BODY_SIZE) {
+        req.destroy();
+        reject(new Error("Request body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });

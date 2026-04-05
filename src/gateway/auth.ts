@@ -2,6 +2,8 @@
  * Gateway authentication: pure functions for API key validation.
  */
 
+import { timingSafeEqual } from "node:crypto";
+
 // input: GatewayAuthConfig, request pathname, and request headers
 // output: boolean indicating whether the request is authenticated
 // pos: stateless auth check extracted from server for testability
@@ -52,6 +54,11 @@ export function checkGatewayAuth(
 
   if (!providedKey) return false;
 
-  // Constant-time-ish comparison against configured keys
-  return authConfig.keys.some(key => key === providedKey);
+  // Constant-time comparison against configured keys
+  return authConfig.keys.some(key => {
+    const a = Buffer.from(key, "utf-8");
+    const b = Buffer.from(providedKey, "utf-8");
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  });
 }
