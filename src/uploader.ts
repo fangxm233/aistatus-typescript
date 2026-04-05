@@ -41,6 +41,10 @@ interface UsageUploadPayload {
   sdk_version: string;
 }
 
+function truncate(value: string, limit: number): string {
+  return value.length > limit ? value.slice(0, limit) : value;
+}
+
 export class UsageUploader {
   private readonly config: AIStatusConfig;
   private readonly baseUrl: string;
@@ -71,9 +75,9 @@ export class UsageUploader {
       records: [
         {
           ts: record.ts,
-          name: this.config.name!,
-          organization: this.config.org,
-          email: this.config.email!,
+          name: truncate(this.config.name!, 200),
+          organization: this.config.org ? truncate(this.config.org, 200) : null,
+          email: truncate(this.config.email!, 254),
           provider: record.provider,
           model: record.model,
           input_tokens: record.in ?? 0,
