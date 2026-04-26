@@ -130,6 +130,63 @@ test("UsageTracker forwards records to uploader after persistence", async () => 
   }
 });
 
+test("UsageTracker records optional metadata fields", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-metadata-test-"));
+
+  try {
+    const { UsageStorage, UsageTracker } = await import("../dist/index.js");
+    const storage = new UsageStorage(tmpDir, "/test/project5");
+    const tracker = new UsageTracker(storage);
+
+    const record = tracker.recordUsage({
+      provider: "anthropic",
+      model: "claude-opus-4-6",
+      input_tokens: 10,
+      output_tokens: 20,
+      latency_ms: 123,
+      fallback: false,
+      billing_mode: "plan",
+      metadata: { project: "dex-hand", trigger: "dispatch" },
+    });
+
+    assert.equal(record.project, "dex-hand");
+    assert.equal(record.trigger, "dispatch");
+    assert.equal(record.billing_mode, "plan");
+
+    const records = storage.read("all");
+    assert.equal(records.length, 1);
+    assert.equal(records[0].project, "dex-hand");
+    assert.equal(records[0].trigger, "dispatch");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("UsageTracker metadata does not overwrite reserved fields", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-meta-reserved-test-"));
+
+  try {
+    const { UsageStorage, UsageTracker } = await import("../dist/index.js");
+    const storage = new UsageStorage(tmpDir, "/test/project6");
+    const tracker = new UsageTracker(storage);
+
+    const record = tracker.recordUsage({
+      provider: "anthropic",
+      model: "claude-opus-4-6",
+      input_tokens: 10,
+      output_tokens: 20,
+      latency_ms: 123,
+      fallback: false,
+      metadata: { model: "evil-override", project: "legit" },
+    });
+
+    assert.equal(record.model, "claude-opus-4-6", "Reserved 'model' field should not be overwritten");
+    assert.equal(record.project, "legit", "Non-reserved metadata should be written");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("UsageStorage persists records to JSONL files", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-storage-test-"));
 

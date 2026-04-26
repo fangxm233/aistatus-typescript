@@ -134,7 +134,7 @@ function parseTs(value?: string): Date | null {
 function periodSince(period: string): Date | null {
   const now = new Date();
   if (period === "today") {
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
   }
   if (period === "week") {
     return new Date(now.getTime() - 7 * 86400_000);
@@ -172,7 +172,9 @@ export class UsageTracker {
     fallback: boolean;
     cost?: number;
     billing_mode?: string;
+    metadata?: Record<string, string>;
   }): UsageUploadRecord {
+    const RESERVED = new Set(["ts", "provider", "model", "in", "out", "cost", "fallback", "latency_ms", "billing_mode", "cache_creation_in", "cache_read_in"]);
     const record: UsageUploadRecord = {
       ts: new Date().toISOString(),
       provider: opts.provider,
@@ -189,6 +191,11 @@ export class UsageTracker {
     }
     if (opts.cache_read_input_tokens) {
       record.cache_read_in = opts.cache_read_input_tokens;
+    }
+    if (opts.metadata) {
+      for (const [k, v] of Object.entries(opts.metadata)) {
+        if (!RESERVED.has(k)) record[k] = v;
+      }
     }
     this.storage.append(record);
     this.uploader?.upload(record);

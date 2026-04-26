@@ -3,9 +3,9 @@
  * Uses Node.js native http.createServer (no express dependency).
  */
 
-// input: GatewayConfig, inbound HTTP requests, upstream provider responses, and usage tracker storage
-// output: gateway HTTP responses, mode/status/usage endpoints, and persisted per-request usage records
-// pos: core gateway runtime that routes requests across configured endpoints and exposes operational APIs
+// input: GatewayConfig, inbound HTTP requests, upstream provider responses, usage tracker storage, and optional GATEWAY_DUMP_DIR env
+// output: gateway HTTP responses, mode/status/usage endpoints, persisted per-request usage records, and optional request+response JSON dumps
+// pos: core gateway runtime that routes requests across configured endpoints, exposes operational APIs, and optionally dumps full API call payloads (request+response) to GATEWAY_DUMP_DIR
 // >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
 
 import * as http from "node:http";
@@ -36,6 +36,33 @@ interface Backend {
   translate: string | null;
 }
 
+// Headers that must NOT be forwarded from upstream to the client:
+//   - hop-by-hop (RFC 7230 §6.1)
+//   - body-framing headers that are invalidated when we decode/re-encode the body
+//   - headers the gateway sets itself (overridden after this helper runs)
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "content-length",
+  "content-encoding",
+  "content-type",
+]);
+
+function forwardUpstreamHeaders(upstream: Response, target: Record<string, string>): void {
+  upstream.headers.forEach((value, key) => {
+    const lower = key.toLowerCase();
+    if (HOP_BY_HOP_HEADERS.has(lower)) return;
+    if (lower.startsWith("x-gateway-")) return; // gateway-managed namespace
+    target[key] = value;
+  });
+}
+
 class ProxyError extends Error {
   status: number;
   body: Buffer;
@@ -54,6 +81,7 @@ export class GatewayServer {
   private _keyIdx: Record<string, number> = {};
   private _pidFile: string | null;
   private _server: http.Server | null = null;
+  private _dumpDir: string | null;
 
   constructor(config: GatewayConfig, pidFile?: string) {
     if (!(config as Partial<GatewayConfig>).endpoint_modes) {
@@ -71,6 +99,10 @@ export class GatewayServer {
     this.usage = new UsageTracker(undefined, new UsageUploader(getConfig()));
     this.pricing = new CostCalculator();
     this._pidFile = pidFile ?? null;
+    this._dumpDir = process.env.GATEWAY_DUMP_DIR || null;
+    if (this._dumpDir) {
+      fs.mkdirSync(this._dumpDir, { recursive: true });
+    }
   }
 
   async run(): Promise<void> {
@@ -141,7 +173,24 @@ export class GatewayServer {
       return this._handleModeSwitch(req, res);
     }
 
-    // Per-request mode: /m/{mode}/{epName}/{pathStr}
+    // Per-request mode with optional metadata: /m/{mode}/{metadata?}/{epName}/{pathStr}
+    // Try 4-segment first (with metadata), fall back to 3-segment (without)
+    const mode4Match = pathname.match(/^\/m\/([^/]+)\/([^/]+)\/([^/]+)\/(.*)$/);
+    if (mode4Match) {
+      const [, requestMode, metaOrEp, epCandidate, pathStr] = mode4Match;
+      if (!this.config.endpoint_modes[requestMode]) {
+        return jsonResponse(res, 400, {
+          error: { message: `Unknown mode: ${requestMode}`, type: "gateway_error" },
+        });
+      }
+      const modeEndpoints = this.config.endpoint_modes[requestMode];
+      if (modeEndpoints[epCandidate]) {
+        const metadata = parseUrlMetadata(metaOrEp);
+        await this._handleProxy(req, res, epCandidate, pathStr, parsedUrl.query as Record<string, string>, requestMode, metadata);
+        return;
+      }
+    }
+
     const modeMatch = pathname.match(/^\/m\/([^/]+)\/([^/]+)\/(.*)$/);
     if (modeMatch) {
       const [, requestMode, epName, pathStr] = modeMatch;
@@ -177,6 +226,7 @@ export class GatewayServer {
     pathStr: string,
     query: Record<string, string>,
     modeOverride?: string,
+    metadata?: Record<string, string>,
   ): Promise<void> {
     // Use per-request mode endpoints if specified, otherwise global config
     const endpoints = modeOverride
@@ -207,7 +257,7 @@ export class GatewayServer {
         endpoint, backend.id, body, originalModel,
       );
       try {
-        return await this._forward(req, res, backend, pathStr, effectiveBody, query, model, fallbackHeader, billingMode);
+        return await this._forward(req, res, backend, pathStr, effectiveBody, query, model, fallbackHeader, billingMode, metadata);
       } catch (e) {
         if (e instanceof ProxyError) {
           lastErr = e;
@@ -298,6 +348,7 @@ export class GatewayServer {
     model: string,
     fallbackHeader: string,
     billingMode?: string,
+    metadata?: Record<string, string>,
   ): Promise<void> {
     const needsTranslate = backend.translate === "anthropic-to-openai";
 
@@ -367,9 +418,9 @@ export class GatewayServer {
     const isStreaming = contentType.includes("text/event-stream");
 
     if (isStreaming) {
-      await this._stream(res, upstreamRes, backend, originalModel, fallbackHeader, elapsedMs, billingMode);
+      await this._stream(res, upstreamRes, backend, originalModel, fallbackHeader, elapsedMs, billingMode, body, metadata);
     } else {
-      await this._respond(res, upstreamRes, backend, originalModel, elapsedMs, fallbackHeader, billingMode);
+      await this._respond(res, upstreamRes, backend, originalModel, elapsedMs, fallbackHeader, billingMode, body, metadata);
     }
   }
 
@@ -381,6 +432,8 @@ export class GatewayServer {
     elapsedMs: number,
     fallbackHeader: string,
     billingMode?: string,
+    requestBody?: Buffer,
+    metadata?: Record<string, string>,
   ): Promise<void> {
     const ab = await upstream.arrayBuffer();
     let respBody: Buffer = Buffer.from(ab as ArrayBuffer);
@@ -404,20 +457,19 @@ export class GatewayServer {
     }
 
     // Record usage
-    this._recordUsageIfPossible(backend, respBody, originalModel, elapsedMs, billingMode);
+    this._recordUsageIfPossible(backend, respBody, originalModel, elapsedMs, billingMode, metadata);
 
-    // Build response headers
-    const resHeaders: Record<string, string> = {
-      "content-type": charset ? `${contentType}; charset=${charset}` : contentType,
-      "x-gateway-backend": backend.id,
-      "x-gateway-ms": String(elapsedMs),
-    };
+    // Dump request + response
+    this._dumpApiCall(requestBody, respBody, originalModel, backend.id, elapsedMs);
+
+    // Build response headers — forward all upstream headers, then set our own
+    const resHeaders: Record<string, string> = {};
+    forwardUpstreamHeaders(upstream, resHeaders);
+    resHeaders["content-type"] = charset ? `${contentType}; charset=${charset}` : contentType;
+    resHeaders["x-gateway-backend"] = backend.id;
+    resHeaders["x-gateway-ms"] = String(elapsedMs);
     if (fallbackHeader) {
       resHeaders["x-gateway-model-fallback"] = fallbackHeader;
-    }
-    for (const h of ["x-request-id", "openai-organization", "anthropic-ratelimit-requests-remaining"]) {
-      const v = upstream.headers.get(h);
-      if (v) resHeaders[h] = v;
     }
 
     res.writeHead(upstream.status, resHeaders);
@@ -432,23 +484,20 @@ export class GatewayServer {
     fallbackHeader: string,
     elapsedMs?: number,
     billingMode?: string,
+    requestBody?: Buffer,
+    metadata?: Record<string, string>,
   ): Promise<void> {
     const needsTranslate = backend.translate === "anthropic-to-openai";
 
-    const resHeaders: Record<string, string> = {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      "connection": "keep-alive",
-      "x-gateway-backend": backend.id,
-    };
+    // Forward all upstream headers, then overlay our SSE-required values
+    const resHeaders: Record<string, string> = {};
+    forwardUpstreamHeaders(upstream, resHeaders);
+    resHeaders["content-type"] = "text/event-stream";
+    resHeaders["cache-control"] = "no-cache";
+    resHeaders["connection"] = "keep-alive";
+    resHeaders["x-gateway-backend"] = backend.id;
     if (fallbackHeader) {
       resHeaders["x-gateway-model-fallback"] = fallbackHeader;
-    }
-    if (!needsTranslate) {
-      for (const h of ["x-request-id", "openai-organization"]) {
-        const v = upstream.headers.get(h);
-        if (v) resHeaders[h] = v;
-      }
     }
 
     res.writeHead(200, resHeaders);
@@ -463,6 +512,7 @@ export class GatewayServer {
     // Accumulate SSE data to extract usage from stream events
     let sseBuffer = "";
     const streamUsage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+    const dumpChunks: Buffer[] = this._dumpDir ? [] : [];
 
     const parseSSEForUsage = (chunk: string): void => {
       sseBuffer += chunk;
@@ -504,6 +554,7 @@ export class GatewayServer {
             if (done) break;
             const buf = Buffer.from(value);
             try { parseSSEForUsage(buf.toString("utf-8")); } catch { /* ignore */ }
+            if (dumpChunks) dumpChunks.push(buf);
             yield buf;
           }
         };
@@ -518,6 +569,7 @@ export class GatewayServer {
           if (done) break;
           const buf = Buffer.from(value);
           res.write(buf);
+          if (dumpChunks) dumpChunks.push(buf);
           try { parseSSEForUsage(buf.toString("utf-8")); } catch { /* ignore */ }
         }
       }
@@ -530,6 +582,10 @@ export class GatewayServer {
     }
 
     res.end();
+
+    // Dump request + streamed response
+    const streamedResponse = dumpChunks.length > 0 ? Buffer.concat(dumpChunks) : undefined;
+    this._dumpApiCall(requestBody, streamedResponse, originalModel, backend.id, elapsedMs ?? 0);
 
     // Record usage extracted from stream
     if (streamUsage.input_tokens > 0 || streamUsage.output_tokens > 0) {
@@ -550,6 +606,7 @@ export class GatewayServer {
         fallback: backend.id.includes(":fb:"),
         billing_mode: billingMode || this.config.mode,
         cost,
+        metadata,
       });
     }
   }
@@ -585,6 +642,40 @@ export class GatewayServer {
   }
 
   // ------------------------------------------------------------------
+  // API call dump
+  // ------------------------------------------------------------------
+
+  private _dumpApiCall(
+    requestBody: Buffer | undefined,
+    responseBody: Buffer | undefined,
+    model: string,
+    backendId: string,
+    elapsedMs: number,
+  ): void {
+    if (!this._dumpDir || !requestBody || requestBody.length === 0) return;
+    try {
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const filePath = path.join(this._dumpDir, `${ts}.json`);
+      let request: unknown;
+      try { request = JSON.parse(requestBody.toString("utf-8")); } catch { request = requestBody.toString("utf-8"); }
+      let response: unknown;
+      if (responseBody && responseBody.length > 0) {
+        const text = responseBody.toString("utf-8");
+        try { response = JSON.parse(text); } catch { response = text; }
+      }
+      const dump: Record<string, unknown> = {
+        ts: new Date().toISOString(),
+        model: model || undefined,
+        backend: backendId,
+        latency_ms: elapsedMs,
+        request,
+      };
+      if (response !== undefined) dump.response = response;
+      fs.writeFileSync(filePath, JSON.stringify(dump) + "\n", "utf-8");
+    } catch { /* dump failure should never break the proxy */ }
+  }
+
+  // ------------------------------------------------------------------
   // Usage recording
   // ------------------------------------------------------------------
 
@@ -594,6 +685,7 @@ export class GatewayServer {
     originalModel: string,
     elapsedMs: number,
     billingMode?: string,
+    metadata?: Record<string, string>,
   ): void {
     let payload: Record<string, unknown>;
     try {
@@ -627,6 +719,7 @@ export class GatewayServer {
       fallback: backend.id.includes(":fb:"),
       billing_mode: billingMode || this.config.mode,
       cost,
+      metadata,
     });
   }
 
@@ -890,6 +983,17 @@ export class GatewayServer {
 // ------------------------------------------------------------------
 // Helpers
 // ------------------------------------------------------------------
+
+function parseUrlMetadata(raw: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const pair of raw.split(",")) {
+    const eqIdx = pair.indexOf("=");
+    if (eqIdx > 0) {
+      result[decodeURIComponent(pair.slice(0, eqIdx))] = decodeURIComponent(pair.slice(eqIdx + 1));
+    }
+  }
+  return result;
+}
 
 function jsonResponse(res: http.ServerResponse, status: number, data: unknown): void {
   const body = JSON.stringify(data);
