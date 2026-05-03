@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.0.5 — 2026-04-26
+
+Gateway observability, hot-reload, identity hardening, and metadata plumbing.
+
+### Gateway
+
+- **Per-request URL metadata** — `/m/{mode}/{metadata}/{epName}/{pathStr}` route now accepts an optional metadata segment: comma-separated `key=value` pairs (e.g. `/m/prod/agent=cortex,task=42/openai/v1/chat/completions`). Metadata is URL-decoded and threaded through to usage records, surfacing in `/usage` responses and uploads.
+- **`GATEWAY_DUMP_DIR` full-call auditing** — set the `GATEWAY_DUMP_DIR` environment variable to write a JSON dump of every proxied request+response to that directory (one `{timestamp}.json` per call). Covers both streaming and non-streaming paths. Dump failures silently degrade — they never break the proxy.
+- **Upstream header forwarding** — response headers from upstream providers are now forwarded wholesale (minus RFC 7230 hop-by-hop headers and `x-gateway-*` namespace), replacing the previous hardcoded allowlist of `x-request-id` / `openai-organization` / `anthropic-ratelimit-requests-remaining`.
+- **Config hot-reload** — `GatewayServer.reloadConfig()` swaps the full gateway configuration in place without dropping the HTTP server, preserving bound host/port and in-memory health/usage trackers. `startGateway()` wires in `watchConfigFile()` by default (mtime polling at 1s, 200ms debounce); opt out with `watchConfig: false`.
+- **DeepSeek thinking block injection** — when Anthropic extended thinking is enabled and the upstream is DeepSeek, the gateway now injects empty `thinking` blocks into assistant messages that lack them. DeepSeek requires `reasoning_content` on every assistant turn in multi-turn conversations; clients that strip empty `thinking=""` blocks would otherwise get 400 errors.
+
+### Usage & Upload
+
+- **Identity field truncation** — `name` (200 chars), `organization` (200 chars), and `email` (254 chars) are now truncated in upload payloads to prevent oversized requests from malformed or excessively long config values.
+- **Metadata in usage records** — `UsageTracker.recordUsage()` accepts an optional `metadata` dict. Non-reserved keys are merged into the usage record, passed through both local storage and uploader fan-out.
+
+### Fixes & Hardening
+
+- **Gateway SSE dump collection** — streaming response chunks are accumulated alongside real-time forwarding so that `GATEWAY_DUMP_DIR` captures the full streamed response.
+- **Usage record reserved-key filtering** — metadata keys that collide with built-in usage fields (`ts`, `provider`, `model`, `in`, `out`, `cost`, `fallback`, `latency_ms`, `billing_mode`, `cache_creation_in`, `cache_read_in`) are silently dropped to prevent record corruption.
+- **CI** — added `NODE_AUTH_TOKEN` for npm publish; removed broken `npm self-upgrade` step.
+
 ## 0.0.4 — 2026-04-04
 
 Opt-in usage upload pipeline and cache-aware pricing for the leaderboard flow.
