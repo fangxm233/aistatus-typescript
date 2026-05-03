@@ -5,7 +5,7 @@
 
 // input: GatewayConfig, inbound HTTP requests, upstream provider responses, usage tracker storage, and optional GATEWAY_DUMP_DIR env
 // output: gateway HTTP responses, mode/status/usage endpoints, persisted per-request usage records, and optional request+response JSON dumps
-// pos: core gateway runtime that routes requests across configured endpoints, exposes operational APIs, and optionally dumps full API call payloads (request+response) to GATEWAY_DUMP_DIR
+// pos: core gateway runtime that routes requests across configured endpoints, exposes operational APIs, supports hot config reload, and optionally dumps full API call payloads (request+response) to GATEWAY_DUMP_DIR
 // >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
 
 import * as http from "node:http";
@@ -103,6 +103,39 @@ export class GatewayServer {
     if (this._dumpDir) {
       fs.mkdirSync(this._dumpDir, { recursive: true });
     }
+  }
+
+  /**
+   * Hot-reload the gateway configuration in place. Preserves bound host/port,
+   * health and usage trackers; resets round-robin key index. Falls back to a
+   * still-available mode if the active mode disappeared from the new config.
+   */
+  reloadConfig(newConfig: GatewayConfig): void {
+    if (newConfig.host !== this.config.host || newConfig.port !== this.config.port) {
+      console.warn(
+        `[gateway] host/port change ignored on reload (already bound to ${this.config.host}:${this.config.port})`,
+      );
+    }
+    newConfig.host = this.config.host;
+    newConfig.port = this.config.port;
+
+    if (!newConfig.endpoint_modes || Object.keys(newConfig.endpoint_modes).length === 0) {
+      newConfig.endpoint_modes = { [newConfig.mode ?? "default"]: newConfig.endpoints ?? {} };
+    }
+    const availableModes = Object.keys(newConfig.endpoint_modes);
+    const desiredMode = this.config.mode;
+    const activeMode = newConfig.endpoint_modes[desiredMode]
+      ? desiredMode
+      : (availableModes[0] ?? "default");
+    newConfig.mode = activeMode;
+    newConfig.endpoints = newConfig.endpoint_modes[activeMode] ?? {};
+
+    this.config = newConfig;
+    this._keyIdx = {};
+    console.log("[gateway] Config reloaded");
+    void this._applyGlobalModelHealthPrecheck().catch(err => {
+      console.warn("[gateway] post-reload health precheck failed:", err);
+    });
   }
 
   async run(): Promise<void> {
@@ -382,6 +415,14 @@ export class GatewayServer {
     // Model mapping / prefix
     if (body.length > 0 && (Object.keys(backend.model_map).length > 0 || backend.model_prefix)) {
       upstreamBody = mapModel(upstreamBody, backend);
+    }
+
+    // DeepSeek: inject empty thinking blocks for assistant messages that lack them.
+    // DeepSeek API requires every assistant message in a multi-turn conversation to
+    // carry its reasoning_content (even if empty). When the upstream returns
+    // thinking="" the client may drop it; the gateway restores it before forwarding.
+    if (billingMode?.includes("deepseek") && upstreamBody.length > 0 && hasThinkingEnabled(upstreamBody)) {
+      upstreamBody = ensureThinkingBlocks(upstreamBody);
     }
 
     // Send request
@@ -1114,6 +1155,59 @@ function inferProvider(backend: Backend, model: string): string {
   if (bid.startsWith("google")) return "google";
   if (bid.startsWith("openrouter")) return "openrouter";
   return bid.split(":", 1)[0] || "unknown";
+}
+
+/**
+ * Check whether the request has Anthropic extended thinking enabled.
+ * Looks for the "thinking" top-level field with type "enabled" or "auto".
+ */
+function hasThinkingEnabled(body: Buffer): boolean {
+  try {
+    const data = JSON.parse(body.toString("utf-8"));
+    const thinking = data.thinking;
+    if (!thinking || typeof thinking !== "object") return false;
+    const t = (thinking as Record<string, unknown>).type;
+    return t === "enabled" || t === "auto";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * DeepSeek API requires every assistant message in a multi-turn conversation to
+ * carry its reasoning_content (even when empty). If the client dropped an empty
+ * thinking block, re-inject it so the upstream doesn't reject the request.
+ */
+function ensureThinkingBlocks(body: Buffer): Buffer {
+  try {
+    const data = JSON.parse(body.toString("utf-8"));
+    const messages = data.messages;
+    if (!Array.isArray(messages)) return body;
+
+    let modified = false;
+    for (const msg of messages) {
+      if (msg.role !== "assistant") continue;
+      const content = msg.content;
+      if (!Array.isArray(content)) continue;
+
+      const hasThinking = content.some(
+        (b: Record<string, unknown>) => b.type === "thinking",
+      );
+      if (hasThinking) continue;
+
+      const firstTextIdx = content.findIndex(
+        (b: Record<string, unknown>) => b.type === "text",
+      );
+      if (firstTextIdx < 0) continue;
+
+      content.splice(firstTextIdx, 0, { type: "thinking", thinking: "" });
+      modified = true;
+    }
+
+    return modified ? Buffer.from(JSON.stringify(data), "utf-8") : body;
+  } catch {
+    return body;
+  }
 }
 
 function asInt(value: unknown): number {

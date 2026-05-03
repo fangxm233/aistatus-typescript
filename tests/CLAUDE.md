@@ -19,3 +19,4 @@ SDK 回归测试目录，覆盖 config、gateway server、usage、router、healt
 | `middleware.test.mjs` | regression test | Verify middleware hooks (beforeRequest, afterResponse, onError), execution order, dynamic use(), abort, tier routing, and fallback integration |
 | `gateway-auth.test.mjs` | regression test | Verify gateway API key authentication: Bearer/custom header, public paths, env var resolution, backward compatibility |
 | `multimodal-structured-stream.test.mjs` | regression test | Verify multimodal ContentBlock[] messages, ResponseFormat options, StreamChunk error type, routeStreamCallbacks, streamToReadable, and AbortSignal cancellation |
+| `gateway-reload.test.mjs` | regression test | Verify `GatewayServer.reloadConfig()` in-place hot reload (host/port pinning, active-mode fallback) and `watchConfigFile()` mtime-polling change detection |
