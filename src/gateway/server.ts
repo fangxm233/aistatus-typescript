@@ -262,12 +262,26 @@ export class GatewayServer {
     metadata?: Record<string, string>,
   ): Promise<void> {
     // Use per-request mode endpoints if specified, otherwise global config
-    const endpoints = modeOverride
+    let endpoints = modeOverride
       ? this.config.endpoint_modes[modeOverride] ?? this.config.endpoints
       : this.config.endpoints;
-    const billingMode = modeOverride || this.config.mode;
+    let billingMode = modeOverride || this.config.mode;
 
-    const endpoint = endpoints[epName];
+    let endpoint = endpoints[epName];
+    if (!endpoint && !modeOverride) {
+      // Auto-discover: search all other modes for the requested endpoint
+      for (const [modeName, modeEndpoints] of Object.entries(this.config.endpoint_modes)) {
+        if (modeName === this.config.mode) continue;
+        const found = modeEndpoints[epName];
+        if (found) {
+          endpoints = modeEndpoints;
+          billingMode = modeName;
+          endpoint = found;
+          break;
+        }
+      }
+    }
+
     if (!endpoint) {
       return jsonResponse(res, 404, {
         error: { message: `Unknown endpoint: ${epName}`, type: "gateway_error" },
