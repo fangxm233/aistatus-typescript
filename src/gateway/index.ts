@@ -16,7 +16,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 export { GatewayServer } from "./server.js";
-export { loadConfig, autoDiscover, generateConfig, fromDict } from "./config.js";
+export {
+  loadConfig,
+  autoDiscover,
+  generateConfig,
+  fromDict,
+  DEFAULT_BASE_URLS,
+  AUTH_STYLES,
+  RESERVED_KEYS,
+} from "./config.js";
 export type { GatewayConfig, EndpointConfig, FallbackConfig } from "./config.js";
 export { checkGatewayAuth } from "./auth.js";
 export type { GatewayAuthConfig } from "./auth.js";

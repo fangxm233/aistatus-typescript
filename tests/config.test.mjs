@@ -118,6 +118,144 @@ test("fromDict keeps flat config backward compatible", async () => {
   assert.equal(config.endpoint_modes.default.openai.keys[0], "sk-test");
 });
 
+// ─── Fix 1: arbitrary endpoint names (no hardcoded provider whitelist) ─────
+
+test("fromDict accepts arbitrary endpoint names beyond hardcoded providers", async () => {
+  const { fromDict } = await import("../dist/gateway/index.js");
+
+  // PI exposes ~22 built-in providers (xai, openrouter, github-copilot, kimi-coding, ...).
+  // None of these should be silently dropped just because they aren't in a code-level allowlist.
+  const config = fromDict({
+    xai: {
+      base_url: "https://api.x.ai/v1",
+      auth_style: "bearer",
+      keys: ["xai-test"],
+    },
+    "github-copilot": {
+      base_url: "https://api.individual.githubcopilot.com",
+      auth_style: "bearer",
+      passthrough: true,
+    },
+    "kimi-coding": {
+      base_url: "https://api.kimi.com/coding",
+      auth_style: "bearer",
+      passthrough: true,
+    },
+  });
+
+  assert.ok("xai" in config.endpoints, "xai endpoint should be parsed");
+  assert.ok("github-copilot" in config.endpoints, "github-copilot endpoint should be parsed");
+  assert.ok("kimi-coding" in config.endpoints, "kimi-coding endpoint should be parsed");
+  assert.equal(config.endpoints.xai.base_url, "https://api.x.ai/v1");
+  assert.equal(config.endpoints.xai.keys[0], "xai-test");
+});
+
+test("fromDict reserves system keys and does not treat them as endpoints", async () => {
+  const { fromDict } = await import("../dist/gateway/index.js");
+
+  const config = fromDict({
+    host: "127.0.0.1",
+    port: 9880,
+    status_check: true,
+    auth: { keys: [], enabled: false },
+    mode: "default",
+    customEndpoint: {
+      base_url: "https://custom.example.com",
+      auth_style: "bearer",
+    },
+  });
+
+  // System keys must NOT become endpoints
+  assert.ok(!("host" in config.endpoints), "host must not be an endpoint");
+  assert.ok(!("port" in config.endpoints), "port must not be an endpoint");
+  assert.ok(!("status_check" in config.endpoints), "status_check must not be an endpoint");
+  assert.ok(!("auth" in config.endpoints), "auth must not be an endpoint");
+  assert.ok(!("mode" in config.endpoints), "mode must not be an endpoint");
+  // Non-reserved key is a normal endpoint
+  assert.ok("customEndpoint" in config.endpoints, "customEndpoint should be parsed");
+});
+
+test("fromDict accepts nested mode-aware config under arbitrary endpoint name", async () => {
+  const { fromDict } = await import("../dist/gateway/index.js");
+
+  const config = fromDict({
+    mode: "production",
+    "openai-codex": {
+      production: {
+        base_url: "https://chatgpt.com/backend-api",
+        auth_style: "bearer",
+        passthrough: true,
+      },
+      sandbox: {
+        base_url: "https://sandbox.chatgpt.com/backend-api",
+        auth_style: "bearer",
+      },
+    },
+  });
+
+  assert.equal(config.mode, "production");
+  assert.deepEqual(Object.keys(config.endpoint_modes).sort(), ["production", "sandbox"]);
+  assert.equal(
+    config.endpoint_modes.production["openai-codex"].base_url,
+    "https://chatgpt.com/backend-api",
+  );
+});
+
+// ─── Fix 2: openai-codex default base_url ──────────────────────────────
+
+test("DEFAULT_BASE_URLS['openai-codex'] points to ChatGPT backend, not OpenAI Platform", async () => {
+  const { DEFAULT_BASE_URLS } = await import("../dist/gateway/index.js");
+
+  // OpenAI Codex uses the ChatGPT backend (OAuth bearer to ChatGPT Plus/Pro subscription),
+  // NOT api.openai.com (which is the separately-billed Platform API).
+  // Reference: PI source node_modules/@mariozechner/pi-ai/dist/providers/openai-codex-responses.js
+  //   `const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"`
+  assert.equal(DEFAULT_BASE_URLS["openai-codex"], "https://chatgpt.com/backend-api");
+});
+
+test("fromDict uses correct codex default base_url when YAML omits base_url", async () => {
+  const { fromDict } = await import("../dist/gateway/index.js");
+  const config = fromDict({
+    "openai-codex": {
+      auth_style: "bearer",
+      passthrough: true,
+    },
+  });
+  assert.equal(config.endpoints["openai-codex"].base_url, "https://chatgpt.com/backend-api");
+});
+
+// ─── Fix 3: OPENAI_CODEX_API_KEY removed from AUTO_DISCOVER_MAP ──────
+
+test("autoDiscover does NOT pick up OPENAI_CODEX_API_KEY (codex is OAuth, no static key)", async () => {
+  const saved = {
+    OPENAI_CODEX_API_KEY: process.env.OPENAI_CODEX_API_KEY,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+  };
+
+  process.env.OPENAI_CODEX_API_KEY = "should-be-ignored";
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.DEEPSEEK_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+
+  try {
+    const { autoDiscover } = await import(`../dist/gateway/index.js?codex-discover=${Date.now()}`);
+    const config = autoDiscover();
+    assert.ok(
+      !("openai-codex" in config.endpoints),
+      "openai-codex must not be auto-discovered from env: it requires OAuth bearer, not a static API key",
+    );
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
 test("fromDict defaults nested mode to first discovered mode when top-level mode missing", async () => {
   const { fromDict } = await import("../dist/gateway/index.js");
 
