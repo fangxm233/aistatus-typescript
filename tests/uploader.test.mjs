@@ -63,7 +63,7 @@ test("UsageUploader builds upload payload and fires fetch without awaiting", asy
           latency_ms: 890,
         },
       ],
-      sdk_version: "0.0.5",
+      sdk_version: "0.0.6",
     });
   } finally {
     globalThis.fetch = savedFetch;

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.6 — 2026-05-24
+
+### Gateway — Config
+
+- **`RESERVED_KEYS` auto-discovery** — replaced the hardcoded `["anthropic", "openai", "google"]` endpoint allowlist in `fromDict` with a `RESERVED_KEYS` denylist. Every YAML key not in the reserved set is treated as an endpoint identifier. This lets users route arbitrary PI provider names (openai-codex, deepseek, xai, github-copilot, kimi-coding, etc.) through the gateway without bumping a code-level allowlist on every new provider.
+- **Cross-mode endpoint routing** — when a request arrives without a `/m/{mode}/` prefix and the target endpoint is not in the active mode, `_handleProxy` now searches all `endpoint_modes` and re-routes with the correct billing mode. This enables the gateway to serve endpoints from multiple modes simultaneously.
+- **New built-in providers** — `openai-codex` and `deepseek` added to `DEFAULT_BASE_URLS`. `openai-codex` uses `https://chatgpt.com/backend-api` (ChatGPT Plus/Pro OAuth subscription, not the Platform API). `AUTH_STYLES` defaults to `bearer` for both.
+- **`DEEPSEEK_API_KEY` auto-discovery** — added to `AUTO_DISCOVER_MAP`. `openai-codex` intentionally excluded as it uses OAuth, not a static API key.
+- **`generateConfig` template** — includes `openai-codex` and `deepseek` sections with `passthrough: true`.
+
+### Exports
+
+- **`RESERVED_KEYS`**, **`DEFAULT_BASE_URLS`**, **`AUTH_STYLES`** exported from `aistatus/gateway` for downstream consumers (agent-server gateway-generator, external tooling).
+
 ## 0.0.5 — 2026-04-26
 
 Gateway observability, hot-reload, identity hardening, and metadata plumbing.
