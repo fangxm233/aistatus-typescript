@@ -16,7 +16,7 @@ test("UsageUploader builds upload payload and fires fetch without awaiting", asy
   };
 
   try {
-    const { UsageUploader } = await import(`../dist/index.js?payload=${Date.now()}`);
+    const { UsageUploader, VERSION } = await import(`../dist/index.js?payload=${Date.now()}`);
 
     const uploader = new UsageUploader({
       name: "Test User",
@@ -63,7 +63,7 @@ test("UsageUploader builds upload payload and fires fetch without awaiting", asy
           latency_ms: 890,
         },
       ],
-      sdk_version: "0.0.6",
+      sdk_version: VERSION,
     });
   } finally {
     globalThis.fetch = savedFetch;
