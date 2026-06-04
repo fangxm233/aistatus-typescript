@@ -163,7 +163,7 @@ test.beforeEach(() => {
 test("Router remembers provider failures across route() calls (health tracking)", async () => {
   const router = new Router({ autoDiscover: false });
 
-  router.registerProvider({ slug: "primary", adapterType: "test-always-fail", _statusCode: 429 });
+  router.registerProvider({ slug: "primary", adapterType: "test-always-fail", _statusCode: 503 });
   router.registerProvider({ slug: "backup", adapterType: "test-counting" });
 
   // Mock: both providers are candidates

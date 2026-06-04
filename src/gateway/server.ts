@@ -290,12 +290,22 @@ export class GatewayServer {
 
     const body = await readBody(req);
     const originalModel = extractModel(body);
-    const backends = this._buildBackendList(endpoint, req);
+    let backends = this._buildBackendList(endpoint, req);
 
+    // When all backends are in cooldown, pick the one whose cooldown expires soonest
+    // and try it anyway. This prevents a single transient 5xx from blackholing all
+    // traffic for the full cooldown window — the retry may succeed if the upstream
+    // recovered. The worst case is one extra failed attempt before the real cooldown
+    // error surfaces (same as before, just without the instant 503 give-up).
     if (backends.length === 0) {
-      return jsonResponse(res, 503, {
-        error: { message: "All backends unavailable", type: "gateway_error" },
-      });
+      const fallbackBackend = this._pickSoonestCooldownBackend(endpoint, req);
+      if (fallbackBackend) {
+        backends = [fallbackBackend];
+      } else {
+        return jsonResponse(res, 503, {
+          error: { message: "All backends unavailable", type: "gateway_error" },
+        });
+      }
     }
 
     let lastErr: ProxyError | null = null;
@@ -379,6 +389,51 @@ export class GatewayServer {
     }
 
     return backends;
+  }
+
+  /**
+   * Last-resort fallback: when _buildBackendList returns [] (all backends in cooldown),
+   * enumerate every possible backend for the endpoint and return the one whose cooldown
+   * expires soonest. This avoids an instant 503 when a single transient error marked
+   * the only backend unhealthy — the retry often succeeds because the upstream has
+   * already recovered by the time the real request arrives.
+   */
+  private _pickSoonestCooldownBackend(endpoint: EndpointConfig, req: http.IncomingMessage): Backend | null {
+    const ep = endpoint.name;
+    const candidates: Array<{ id: string; backend: Backend }> = [];
+
+    // Managed keys
+    for (let i = 0; i < endpoint.keys.length; i++) {
+      const bid = `${ep}:key:${i}`;
+      candidates.push({ id: bid, backend: primaryBackend(bid, endpoint, endpoint.keys[i]) });
+    }
+    // Passthrough
+    if (endpoint.keys.length === 0 || endpoint.passthrough) {
+      const bid = `${ep}:passthrough`;
+      const incomingKey = extractIncomingKey(req, endpoint.auth_style);
+      if (incomingKey) {
+        candidates.push({ id: bid, backend: primaryBackend(bid, endpoint, incomingKey) });
+      }
+    }
+    // Fallbacks
+    for (const fb of endpoint.fallbacks) {
+      if (!fb.api_key) continue;
+      const bid = `${ep}:fb:${fb.name}`;
+      candidates.push({
+        id: bid,
+        backend: {
+          id: bid, base_url: fb.base_url, api_key: fb.api_key,
+          auth_style: fb.auth_style, model_prefix: fb.model_prefix,
+          model_map: fb.model_map, translate: fb.translate,
+        },
+      });
+    }
+
+    if (candidates.length === 0) return null;
+
+    const best = this.health.soonestCooldown(candidates.map(c => c.id));
+    if (!best) return candidates[0].backend;
+    return candidates.find(c => c.id === best.id)?.backend ?? null;
   }
 
   // ------------------------------------------------------------------

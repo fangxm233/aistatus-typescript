@@ -28,7 +28,7 @@ export {
 export type { GatewayConfig, EndpointConfig, FallbackConfig } from "./config.js";
 export { checkGatewayAuth } from "./auth.js";
 export type { GatewayAuthConfig } from "./auth.js";
-export { HealthTracker } from "./health.js";
+export { HealthTracker, isServerError } from "./health.js";
 export {
   anthropicRequestToOpenai,
   openaiResponseToAnthropic,
