@@ -1,6 +1,6 @@
 {
   "name": "aistatus",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Status-aware LLM routing for more reliable agents and coding CLIs.",
   "type": "module",
   "license": "MIT",

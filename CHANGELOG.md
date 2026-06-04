@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.7 — 2026-06-04
+
+### Fixes
+
+- **Health check 4xx handling** — 4xx HTTP errors from health check endpoints no longer trigger backend cooldowns. Previously, any non-2xx response (including 403 Forbidden and 429 Too Many Requests from the health endpoint itself) would mark the provider as degraded. Now only 5xx errors and connection failures trigger cooldowns; 4xx responses are treated as client/auth issues rather than backend health problems.
+
 ## 0.0.6 — 2026-05-24
 
 ### Gateway — Config
