@@ -1,6 +1,7 @@
-/**
- * CostCalculator — pricing lookup via aistatus.cc API with memory + file caching.
- */
+// input:  model-search responses, token counts, pricing cache files
+// output: synchronous and refresh-aware token cost calculations
+// pos:    Shared SDK and Gateway pricing cache
+// >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -35,20 +36,16 @@ export class CostCalculator {
   }
 
   calculateCost(provider: string, model: string, inputTokens: number, outputTokens: number): number {
-    const pricing = this.getPricing(provider, model);
-    if (!pricing) return 0;
+    return calculateStandardCost(this.getPricing(provider, model), inputTokens, outputTokens);
+  }
 
-    const { input_per_million, output_per_million } = pricing;
-    if (input_per_million == null && output_per_million == null) return 0;
-
-    let cost = 0;
-    if (input_per_million != null) {
-      cost += (Math.max(inputTokens, 0) / 1_000_000) * input_per_million;
-    }
-    if (output_per_million != null) {
-      cost += (Math.max(outputTokens, 0) / 1_000_000) * output_per_million;
-    }
-    return Math.round(cost * 1e8) / 1e8;
+  async calculateCostAsync(
+    provider: string,
+    model: string,
+    inputTokens: number,
+    outputTokens: number,
+  ): Promise<number> {
+    return calculateStandardCost(await this._getPricingAfterRefresh(provider, model), inputTokens, outputTokens);
   }
 
   calculateCostWithCache(
@@ -59,26 +56,21 @@ export class CostCalculator {
     cacheCreationInputTokens: number,
     cacheReadInputTokens: number,
   ): number {
-    const pricing = this.getPricing(provider, model);
-    if (!pricing) return 0;
+    return calculateCacheCost(
+      this.getPricing(provider, model), inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens,
+    );
+  }
 
-    const { input_per_million, output_per_million, input_cache_read_per_million, input_cache_write_per_million } = pricing;
-    if (input_per_million == null && output_per_million == null) return 0;
-
-    let cost = 0;
-    if (input_per_million != null) {
-      cost += (Math.max(inputTokens, 0) / 1_000_000) * input_per_million;
-      // Cache creation: use fetched price, fallback to 1.25x input price
-      const cacheWritePrice = input_cache_write_per_million ?? (input_per_million * 1.25);
-      cost += (Math.max(cacheCreationInputTokens, 0) / 1_000_000) * cacheWritePrice;
-      // Cache read: use fetched price, fallback to 0.10x input price
-      const cacheReadPrice = input_cache_read_per_million ?? (input_per_million * 0.10);
-      cost += (Math.max(cacheReadInputTokens, 0) / 1_000_000) * cacheReadPrice;
-    }
-    if (output_per_million != null) {
-      cost += (Math.max(outputTokens, 0) / 1_000_000) * output_per_million;
-    }
-    return Math.round(cost * 1e8) / 1e8;
+  async calculateCostWithCacheAsync(
+    provider: string,
+    model: string,
+    inputTokens: number,
+    outputTokens: number,
+    cacheCreationInputTokens: number,
+    cacheReadInputTokens: number,
+  ): Promise<number> {
+    const pricing = await this._getPricingAfterRefresh(provider, model);
+    return calculateCacheCost(pricing, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens);
   }
 
   getPricing(provider: string, model: string): PricingInfo | null {
@@ -101,29 +93,51 @@ export class CostCalculator {
     return null;
   }
 
+  private async _getPricingAfterRefresh(provider: string, model: string): Promise<PricingInfo | null> {
+    const cacheKey = this._normalizeKey(provider, model);
+    const cached = this.getPricing(provider, model);
+    if (cached) return cached;
+
+    await this._pendingRefreshes.get(cacheKey);
+    const now = Date.now() / 1000;
+    const memoryEntry = this._memoryCache.get(cacheKey);
+    if (memoryEntry && this._isFresh(memoryEntry, now)) return memoryEntry.pricing;
+
+    const fileEntry = this._readFileCache()[cacheKey];
+    if (!fileEntry || !this._isFresh(fileEntry, now)) return null;
+    this._memoryCache.set(cacheKey, fileEntry);
+    return fileEntry.pricing;
+  }
+
   private _refreshPricing(
     cacheKey: string,
     provider: string,
     model: string,
     fileCache: Record<string, CacheEntry>,
-  ): void {
-    if (this._pendingRefreshes.has(cacheKey)) {
-      return;
-    }
+  ): Promise<void> {
+    const pending = this._pendingRefreshes.get(cacheKey);
+    if (pending) return pending;
 
-    const refresh = (async () => {
-      const pricing = await this._fetchPricing(provider, model);
-      if (pricing == null) return;
-
-      const entry: CacheEntry = { ts: Date.now() / 1000, pricing };
-      this._memoryCache.set(cacheKey, entry);
-      fileCache[cacheKey] = entry;
-      this._writeFileCache(fileCache);
-    })().finally(() => {
-      this._pendingRefreshes.delete(cacheKey);
-    });
-
+    const refresh = this._fetchAndCachePricing(cacheKey, provider, model, fileCache)
+      .catch(() => undefined)
+      .finally(() => this._pendingRefreshes.delete(cacheKey));
     this._pendingRefreshes.set(cacheKey, refresh);
+    return refresh;
+  }
+
+  private async _fetchAndCachePricing(
+    cacheKey: string,
+    provider: string,
+    model: string,
+    fileCache: Record<string, CacheEntry>,
+  ): Promise<void> {
+    const pricing = await this._fetchPricing(provider, model);
+    if (pricing == null) return;
+
+    const entry: CacheEntry = { ts: Date.now() / 1000, pricing };
+    this._memoryCache.set(cacheKey, entry);
+    fileCache[cacheKey] = entry;
+    this._writeFileCache(fileCache);
   }
 
   private async _fetchPricing(provider: string, model: string): Promise<PricingInfo | null> {
@@ -240,6 +254,44 @@ export class CostCalculator {
     }
     return deduped;
   }
+}
+
+function calculateStandardCost(
+  pricing: PricingInfo | null,
+  inputTokens: number,
+  outputTokens: number,
+): number {
+  if (!pricing) return 0;
+  const { input_per_million: inputPrice, output_per_million: outputPrice } = pricing;
+  if (inputPrice == null && outputPrice == null) return 0;
+
+  const inputCost = inputPrice == null ? 0 : (Math.max(inputTokens, 0) / 1_000_000) * inputPrice;
+  const outputCost = outputPrice == null ? 0 : (Math.max(outputTokens, 0) / 1_000_000) * outputPrice;
+  return roundCost(inputCost + outputCost);
+}
+
+function calculateCacheCost(
+  pricing: PricingInfo | null,
+  inputTokens: number,
+  outputTokens: number,
+  cacheCreationInputTokens: number,
+  cacheReadInputTokens: number,
+): number {
+  if (!pricing) return 0;
+  const { input_per_million: inputPrice, output_per_million: outputPrice } = pricing;
+  if (inputPrice == null && outputPrice == null) return 0;
+
+  const inputCost = inputPrice == null ? 0 : (Math.max(inputTokens, 0) / 1_000_000) * inputPrice;
+  const outputCost = outputPrice == null ? 0 : (Math.max(outputTokens, 0) / 1_000_000) * outputPrice;
+  const writePrice = inputPrice == null ? 0 : pricing.input_cache_write_per_million ?? inputPrice * 1.25;
+  const readPrice = inputPrice == null ? 0 : pricing.input_cache_read_per_million ?? inputPrice * 0.10;
+  const writeCost = (Math.max(cacheCreationInputTokens, 0) / 1_000_000) * writePrice;
+  const readCost = (Math.max(cacheReadInputTokens, 0) / 1_000_000) * readPrice;
+  return roundCost(inputCost + outputCost + writeCost + readCost);
+}
+
+function roundCost(cost: number): number {
+  return Math.round(cost * 1e8) / 1e8;
 }
 
 function normalizeModelId(value: string): string {

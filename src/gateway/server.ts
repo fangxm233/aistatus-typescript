@@ -1,12 +1,7 @@
-/**
- * Gateway HTTP server — transparent proxy with failover and key rotation.
- * Uses Node.js native http.createServer (no express dependency).
- */
-
-// input: GatewayConfig, inbound HTTP requests, upstream provider responses, usage tracker storage, and optional GATEWAY_DUMP_DIR env
-// output: gateway HTTP responses, mode/status/usage endpoints, persisted per-request usage records, and optional request+response JSON dumps
-// pos: core gateway runtime that routes requests across configured endpoints, exposes operational APIs, supports hot config reload, and optionally dumps full API call payloads (request+response) to GATEWAY_DUMP_DIR
-// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
+// input:  GatewayConfig, HTTP requests, provider responses
+// output: proxied responses and persisted Gateway usage records
+// pos:    Gateway HTTP routing and accounting runtime
+// >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
 import * as http from "node:http";
 import * as url from "node:url";
@@ -34,6 +29,14 @@ interface Backend {
   model_prefix: string;
   model_map: Record<string, string>;
   translate: string | null;
+}
+
+interface ParsedUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
 }
 
 // Headers that must NOT be forwarded from upstream to the client:
@@ -567,7 +570,7 @@ export class GatewayServer {
     }
 
     // Record usage
-    this._recordUsageIfPossible(backend, respBody, originalModel, elapsedMs, billingMode, metadata);
+    await this._recordUsageIfPossible(backend, respBody, originalModel, elapsedMs, billingMode, metadata);
 
     // Dump request + response
     this._dumpApiCall(requestBody, respBody, originalModel, backend.id, elapsedMs);
@@ -702,9 +705,14 @@ export class GatewayServer {
       const model = originalModel || "";
       const provider = inferProvider(backend, model);
       const resolvedModel = model || `${provider}/unknown`;
-      const cost = (streamUsage.cache_creation_input_tokens > 0 || streamUsage.cache_read_input_tokens > 0)
-        ? this.pricing.calculateCostWithCache(provider, resolvedModel, streamUsage.input_tokens, streamUsage.output_tokens, streamUsage.cache_creation_input_tokens, streamUsage.cache_read_input_tokens)
-        : this.pricing.calculateCost(provider, resolvedModel, streamUsage.input_tokens, streamUsage.output_tokens);
+      const cost = await this._calculateUsageCost(
+        provider,
+        resolvedModel,
+        streamUsage.input_tokens,
+        streamUsage.output_tokens,
+        streamUsage.cache_creation_input_tokens,
+        streamUsage.cache_read_input_tokens,
+      );
       this.usage.recordUsage({
         provider,
         model: resolvedModel,
@@ -789,47 +797,48 @@ export class GatewayServer {
   // Usage recording
   // ------------------------------------------------------------------
 
-  private _recordUsageIfPossible(
+  private async _calculateUsageCost(
+    provider: string,
+    model: string,
+    inputTokens: number,
+    outputTokens: number,
+    cacheCreationInputTokens: number,
+    cacheReadInputTokens: number,
+  ): Promise<number> {
+    if (cacheCreationInputTokens > 0 || cacheReadInputTokens > 0) {
+      return this.pricing.calculateCostWithCacheAsync(
+        provider, model, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens,
+      );
+    }
+    return this.pricing.calculateCostAsync(provider, model, inputTokens, outputTokens);
+  }
+
+  private async _recordUsageIfPossible(
     backend: Backend,
     responseBody: Buffer,
     originalModel: string,
     elapsedMs: number,
     billingMode?: string,
     metadata?: Record<string, string>,
-  ): void {
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(responseBody.toString("utf-8"));
-    } catch {
-      return;
-    }
+  ): Promise<void> {
+    const usage = parseUsageResponse(responseBody, originalModel);
+    if (!usage) return;
 
-    const model = originalModel || (payload.model as string) || "";
-    const usage = (payload.usage as Record<string, unknown>) ?? {};
-
-    const inputTokens = asInt(usage.input_tokens ?? usage.prompt_tokens ?? 0);
-    const outputTokens = asInt(usage.output_tokens ?? usage.completion_tokens ?? 0);
-    const cacheCreationInputTokens = asInt(usage.cache_creation_input_tokens ?? 0);
-    const cacheReadInputTokens = asInt(usage.cache_read_input_tokens ?? 0);
-    if (!model && !inputTokens && !outputTokens) return;
-
-    const provider = inferProvider(backend, model);
-    const resolvedModel = model || `${provider}/unknown`;
-    const cost = (cacheCreationInputTokens > 0 || cacheReadInputTokens > 0)
-      ? this.pricing.calculateCostWithCache(provider, resolvedModel, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens)
-      : this.pricing.calculateCost(provider, resolvedModel, inputTokens, outputTokens);
+    const provider = inferProvider(backend, usage.model);
+    const model = usage.model || `${provider}/unknown`;
+    const cost = await this._calculateUsageCost(
+      provider, model, usage.inputTokens, usage.outputTokens,
+      usage.cacheCreationInputTokens, usage.cacheReadInputTokens,
+    );
     this.usage.recordUsage({
-      provider,
-      model: resolvedModel,
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      cache_creation_input_tokens: cacheCreationInputTokens,
-      cache_read_input_tokens: cacheReadInputTokens,
+      provider, model, cost, metadata,
+      input_tokens: usage.inputTokens,
+      output_tokens: usage.outputTokens,
+      cache_creation_input_tokens: usage.cacheCreationInputTokens,
+      cache_read_input_tokens: usage.cacheReadInputTokens,
       latency_ms: elapsedMs,
       fallback: backend.id.includes(":fb:"),
       billing_mode: billingMode || this.config.mode,
-      cost,
-      metadata,
     });
   }
 
@@ -1214,6 +1223,26 @@ function mapModel(body: Buffer, backend: Backend): Buffer {
   } catch {
     return body;
   }
+}
+
+function parseUsageResponse(responseBody: Buffer, originalModel: string): ParsedUsage | null {
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(responseBody.toString("utf-8"));
+  } catch {
+    return null;
+  }
+
+  const model = originalModel || (payload.model as string) || "";
+  const usage = (payload.usage as Record<string, unknown>) ?? {};
+  const parsed = {
+    model,
+    inputTokens: asInt(usage.input_tokens ?? usage.prompt_tokens ?? 0),
+    outputTokens: asInt(usage.output_tokens ?? usage.completion_tokens ?? 0),
+    cacheCreationInputTokens: asInt(usage.cache_creation_input_tokens ?? 0),
+    cacheReadInputTokens: asInt(usage.cache_read_input_tokens ?? 0),
+  };
+  return model || parsed.inputTokens || parsed.outputTokens ? parsed : null;
 }
 
 function inferProvider(backend: Backend, model: string): string {

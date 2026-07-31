@@ -1,16 +1,14 @@
+// input:  built GatewayServer, stubbed fetch, ephemeral cache/storage
+// output: gateway endpoint, usage, and pricing-refresh regressions
+// pos:    Gateway HTTP runtime integration regression tests
+// >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
-// input: built GatewayServer class from dist and local HTTP requests against ephemeral test servers
-// output: integration regression tests for gateway health/status/usage/mode endpoints and request handling
-// pos: gateway server integration tests covering public HTTP surface including mode switching and raw usage records
-// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
-
-// Server integration test: start gateway, hit endpoints, verify responses
 
 function makeTempUsageTrackerConfig() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-server-test-"));
@@ -521,6 +519,94 @@ test("Gateway server records usage for translated streaming responses", async ()
     globalThis.fetch = savedFetch;
     httpServer.close();
   }
+});
+
+
+const PRICING_RESPONSE = Buffer.from(JSON.stringify({
+  model: "claude-opus-4-6",
+  usage: {
+    input_tokens: 1_000_000,
+    output_tokens: 1_000_000,
+    cache_creation_input_tokens: 1_000_000,
+    cache_read_input_tokens: 1_000_000,
+  },
+}));
+
+const PRICING_BACKEND = {
+  id: "anthropic:key:0",
+  base_url: "https://api.anthropic.com",
+  api_key: "sk-test",
+  auth_style: "anthropic",
+  model_prefix: "",
+  model_map: {},
+  translate: null,
+};
+
+function pricingApiResponse() {
+  return new Response(JSON.stringify({
+    models: [{
+      id: "anthropic/claude-opus-4-6",
+      pricing: {
+        prompt: 0.000005,
+        completion: 0.000025,
+        input_cache_read: 0.0000005,
+        input_cache_write: 0.00000625,
+      },
+    }],
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+async function recordFirstUsage(cacheEntry, fetchImpl) {
+  const { GatewayServer } = await import("../dist/gateway/index.js");
+  const { UsageStorage, UsageTracker } = await import("../dist/index.js");
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-pricing-refresh-"));
+  const cachePath = path.join(tmpDir, "pricing-cache.json");
+  if (cacheEntry) fs.writeFileSync(cachePath, JSON.stringify({ "anthropic/claude-opus-4-6": cacheEntry }));
+
+  const server = new GatewayServer({ host: "127.0.0.1", port: 0, status_check: false, endpoints: {} });
+  server.usage = new UsageTracker(new UsageStorage(tmpDir, "/pricing-refresh"), null);
+  server.pricing._cachePath = cachePath;
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+
+  try {
+    const accounting = server._recordUsageIfPossible(PRICING_BACKEND, PRICING_RESPONSE, "claude-opus-4-6", 10);
+    const pendingRefreshes = [...server.pricing._pendingRefreshes.values()];
+    await accounting;
+    await Promise.allSettled(pendingRefreshes);
+    return server.usage.storage.read("all");
+  } finally {
+    globalThis.fetch = savedFetch;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+test("Gateway prices the first usage record after missing or expired cache refresh", async (t) => {
+  for (const cacheState of ["missing", "expired"]) {
+    await t.test(cacheState, async () => {
+      const cacheEntry = cacheState === "expired"
+        ? { ts: 0, pricing: { input_per_million: 1, output_per_million: 1 } }
+        : null;
+      let fetchCalls = 0;
+      const records = await recordFirstUsage(cacheEntry, async () => {
+        fetchCalls += 1;
+        return pricingApiResponse();
+      });
+
+      assert.equal(fetchCalls, 1);
+      assert.equal(records.length, 1);
+      assert.equal(records[0].cost, 36.75);
+    });
+  }
+});
+
+test("Gateway records zero cost when pricing refresh fails", async () => {
+  const records = await recordFirstUsage(null, async () => {
+    throw new Error("pricing unavailable");
+  });
+
+  assert.equal(records.length, 1);
+  assert.equal(records[0].cost, 0);
 });
 
 
