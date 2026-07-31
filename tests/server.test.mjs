@@ -4,11 +4,21 @@
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+const originalHome = process.env.HOME;
+const suiteHome = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-server-home-"));
+process.env.HOME = suiteHome;
+
+after(() => {
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  fs.rmSync(suiteHome, { recursive: true, force: true });
+});
 
 function makeTempUsageTrackerConfig() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-server-test-"));
@@ -518,6 +528,68 @@ test("Gateway server records usage for translated streaming responses", async ()
   } finally {
     globalThis.fetch = savedFetch;
     httpServer.close();
+  }
+});
+
+
+function anthropicUsageStreamResponse() {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"type":"message_start","message":{"usage":{"input_tokens":1000000,"cache_creation_input_tokens":1000000,"cache_read_input_tokens":1000000}}}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"message_delta","usage":{"output_tokens":1000000}}\n\n'));
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+test("Gateway prices the first SSE usage record after a missing-cache refresh", async () => {
+  const { GatewayServer } = await import("../dist/gateway/index.js");
+  const { UsageStorage, UsageTracker } = await import("../dist/index.js");
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-sse-pricing-"));
+  const savedFetch = globalThis.fetch;
+  let pricingFetchCalls = 0;
+  globalThis.fetch = async (input) => {
+    if (String(input).startsWith("https://aistatus.cc/api/models?")) {
+      pricingFetchCalls += 1;
+      return pricingApiResponse();
+    }
+    return anthropicUsageStreamResponse();
+  };
+
+  const endpoint = {
+    name: "anthropic", base_url: "https://upstream.test", auth_style: "anthropic",
+    keys: ["sk-test"], passthrough: false, fallbacks: [], model_fallbacks: {},
+  };
+  const server = new GatewayServer({ host: "127.0.0.1", port: 0, status_check: false, endpoints: { anthropic: endpoint } });
+  server.usage = new UsageTracker(new UsageStorage(tmpDir, "/sse-pricing"), null);
+  server.pricing._cachePath = path.join(tmpDir, "missing-pricing-cache.json");
+  let resolveRecorded;
+  const recorded = new Promise((resolve) => { resolveRecorded = resolve; });
+  const recordUsage = server.usage.recordUsage.bind(server.usage);
+  server.usage.recordUsage = (options) => {
+    const record = recordUsage(options);
+    resolveRecorded(record);
+    return record;
+  };
+  const httpServer = http.createServer((req, res) => server._handleRequest(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const port = httpServer.address().port;
+    const response = await request(port, "/anthropic/v1/messages", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-opus-4-6", messages: [], stream: true }),
+    });
+    const record = await recorded;
+    assert.equal(response.status, 200);
+    assert.equal(pricingFetchCalls, 1);
+    assert.equal(record.cost, 36.75);
+    assert.equal(server.usage.storage.read("all").length, 1);
+  } finally {
+    globalThis.fetch = savedFetch;
+    httpServer.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 

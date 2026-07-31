@@ -8,63 +8,38 @@ import * as url from "node:url";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import {
-  type EndpointConfig,
-  type GatewayConfig,
-  AUTH_STYLES,
-} from "./config.js";
+import { type EndpointConfig, type GatewayConfig } from "./config.js";
 import { checkGatewayAuth } from "./auth.js";
 import { HealthTracker } from "./health.js";
-import { anthropicRequestToOpenai, openaiResponseToAnthropic, openaiSseToAnthropicSse } from "./translate.js";
+import { anthropicRequestToOpenai, openaiResponseToAnthropic } from "./translate.js";
 import { UsageTracker } from "../usage.js";
 import { CostCalculator } from "../pricing.js";
 import { getConfig } from "../config.js";
 import { UsageUploader } from "../uploader.js";
-
-interface Backend {
-  id: string;
-  base_url: string;
-  api_key: string;
-  auth_style: string;
-  model_prefix: string;
-  model_map: Record<string, string>;
-  translate: string | null;
-}
-
-interface ParsedUsage {
-  model: string;
-  inputTokens: number;
-  outputTokens: number;
-  cacheCreationInputTokens: number;
-  cacheReadInputTokens: number;
-}
-
-// Headers that must NOT be forwarded from upstream to the client:
-//   - hop-by-hop (RFC 7230 §6.1)
-//   - body-framing headers that are invalidated when we decode/re-encode the body
-//   - headers the gateway sets itself (overridden after this helper runs)
-const HOP_BY_HOP_HEADERS = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-  "content-length",
-  "content-encoding",
-  "content-type",
-]);
-
-function forwardUpstreamHeaders(upstream: Response, target: Record<string, string>): void {
-  upstream.headers.forEach((value, key) => {
-    const lower = key.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(lower)) return;
-    if (lower.startsWith("x-gateway-")) return; // gateway-managed namespace
-    target[key] = value;
-  });
-}
+import {
+  buildUpstreamHeaders,
+  ensureThinkingBlocks,
+  extractIncomingKey,
+  extractModel,
+  forwardUpstreamHeaders,
+  hasThinkingEnabled,
+  jsonResponse,
+  mapModel,
+  parseUrlMetadata,
+  parseUsageResponse,
+  primaryBackend,
+  readBody,
+  replaceModel,
+} from "./server-helpers.js";
+import {
+  applyGlobalModelHealthPrecheck,
+  handleHealth,
+  handleStatus,
+  handleUsage,
+} from "./server-info.js";
+import { streamGatewayResponse } from "./stream-response.js";
+import type { Backend } from "./server-types.js";
+import { recordGatewayUsage } from "./usage-accounting.js";
 
 class ProxyError extends Error {
   status: number;
@@ -136,13 +111,13 @@ export class GatewayServer {
     this.config = newConfig;
     this._keyIdx = {};
     console.log("[gateway] Config reloaded");
-    void this._applyGlobalModelHealthPrecheck().catch(err => {
+    void applyGlobalModelHealthPrecheck(this.config, this.health).catch(err => {
       console.warn("[gateway] post-reload health precheck failed:", err);
     });
   }
 
   async run(): Promise<void> {
-    await this._applyGlobalModelHealthPrecheck();
+    await applyGlobalModelHealthPrecheck(this.config, this.health);
 
     const server = http.createServer((req, res) => {
       this._handleRequest(req, res).catch(err => {
@@ -197,13 +172,13 @@ export class GatewayServer {
 
     // Info endpoints
     if (pathname === "/health" && req.method === "GET") {
-      return this._handleHealth(res);
+      return handleHealth(this.config, res);
     }
     if (pathname === "/status" && req.method === "GET") {
-      return this._handleStatus(res);
+      return handleStatus(this.config, this.health, res);
     }
     if (pathname === "/usage" && req.method === "GET") {
-      return this._handleUsage(parsedUrl.query as Record<string, string>, res);
+      return handleUsage(this.usage, parsedUrl.query as Record<string, string>, res);
     }
     if (pathname === "/mode" && req.method === "POST") {
       return this._handleModeSwitch(req, res);
@@ -595,138 +570,21 @@ export class GatewayServer {
     backend: Backend,
     originalModel: string,
     fallbackHeader: string,
-    elapsedMs?: number,
+    elapsedMs = 0,
     billingMode?: string,
     requestBody?: Buffer,
     metadata?: Record<string, string>,
   ): Promise<void> {
-    const needsTranslate = backend.translate === "anthropic-to-openai";
-
-    // Forward all upstream headers, then overlay our SSE-required values
-    const resHeaders: Record<string, string> = {};
-    forwardUpstreamHeaders(upstream, resHeaders);
-    resHeaders["content-type"] = "text/event-stream";
-    resHeaders["cache-control"] = "no-cache";
-    resHeaders["connection"] = "keep-alive";
-    resHeaders["x-gateway-backend"] = backend.id;
-    if (fallbackHeader) {
-      resHeaders["x-gateway-model-fallback"] = fallbackHeader;
-    }
-
-    res.writeHead(200, resHeaders);
-
-    if (!upstream.body) {
-      res.end();
-      return;
-    }
-
-    const reader = upstream.body.getReader();
-
-    // Accumulate SSE data to extract usage from stream events
-    let sseBuffer = "";
-    const streamUsage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
-    const dumpChunks: Buffer[] = this._dumpDir ? [] : [];
-
-    const parseSSEForUsage = (chunk: string): void => {
-      sseBuffer += chunk;
-      while (sseBuffer.includes("\n\n")) {
-        const idx = sseBuffer.indexOf("\n\n");
-        const eventStr = sseBuffer.slice(0, idx).trim();
-        sseBuffer = sseBuffer.slice(idx + 2);
-        for (const line of eventStr.split("\n")) {
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (payload === "[DONE]") continue;
-          try {
-            const data = JSON.parse(payload);
-            if (data.type === "message_start" && data.message?.usage) {
-              const u = data.message.usage;
-              streamUsage.input_tokens = asInt(u.input_tokens ?? 0);
-              streamUsage.cache_creation_input_tokens = asInt(u.cache_creation_input_tokens ?? 0);
-              streamUsage.cache_read_input_tokens = asInt(u.cache_read_input_tokens ?? 0);
-            }
-            if (data.type === "message_delta" && data.usage) {
-              streamUsage.output_tokens = asInt(data.usage.output_tokens ?? 0);
-            }
-            if (data.usage) {
-              streamUsage.input_tokens = asInt(data.usage.input_tokens ?? data.usage.prompt_tokens ?? streamUsage.input_tokens);
-              streamUsage.output_tokens = asInt(data.usage.output_tokens ?? data.usage.completion_tokens ?? streamUsage.output_tokens);
-              streamUsage.cache_creation_input_tokens = asInt(data.usage.cache_creation_input_tokens ?? streamUsage.cache_creation_input_tokens);
-              streamUsage.cache_read_input_tokens = asInt(data.usage.cache_read_input_tokens ?? streamUsage.cache_read_input_tokens);
-            }
-          } catch { /* ignore parse errors */ }
-        }
-      }
-    };
-
-    try {
-      if (needsTranslate) {
-        const chunks = async function* (): AsyncGenerator<Buffer> {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            const buf = Buffer.from(value);
-            try { parseSSEForUsage(buf.toString("utf-8")); } catch { /* ignore */ }
-            if (dumpChunks) dumpChunks.push(buf);
-            yield buf;
-          }
-        };
-
-        for await (const translated of openaiSseToAnthropicSse(chunks(), originalModel)) {
-          res.write(translated);
-        }
-      } else {
-        // Direct SSE passthrough with usage extraction
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const buf = Buffer.from(value);
-          res.write(buf);
-          if (dumpChunks) dumpChunks.push(buf);
-          try { parseSSEForUsage(buf.toString("utf-8")); } catch { /* ignore */ }
-        }
-      }
-    } catch (streamErr) {
-      // Send error event to client before closing the stream
-      try {
-        const errMsg = streamErr instanceof Error ? streamErr.message : String(streamErr);
-        res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "stream_error", message: errMsg } })}\n\n`);
-      } catch { /* response may already be destroyed */ }
-    }
-
-    res.end();
-
-    // Dump request + streamed response
-    const streamedResponse = dumpChunks.length > 0 ? Buffer.concat(dumpChunks) : undefined;
-    this._dumpApiCall(requestBody, streamedResponse, originalModel, backend.id, elapsedMs ?? 0);
-
-    // Record usage extracted from stream
-    if (streamUsage.input_tokens > 0 || streamUsage.output_tokens > 0) {
-      const model = originalModel || "";
-      const provider = inferProvider(backend, model);
-      const resolvedModel = model || `${provider}/unknown`;
-      const cost = await this._calculateUsageCost(
-        provider,
-        resolvedModel,
-        streamUsage.input_tokens,
-        streamUsage.output_tokens,
-        streamUsage.cache_creation_input_tokens,
-        streamUsage.cache_read_input_tokens,
-      );
-      this.usage.recordUsage({
-        provider,
-        model: resolvedModel,
-        input_tokens: streamUsage.input_tokens,
-        output_tokens: streamUsage.output_tokens,
-        cache_creation_input_tokens: streamUsage.cache_creation_input_tokens,
-        cache_read_input_tokens: streamUsage.cache_read_input_tokens,
-        latency_ms: elapsedMs ?? 0,
-        fallback: backend.id.includes(":fb:"),
-        billing_mode: billingMode || this.config.mode,
-        cost,
-        metadata,
-      });
-    }
+    await streamGatewayResponse({
+      res, upstream, backend, originalModel, fallbackHeader, elapsedMs,
+      billingMode,
+      defaultBillingMode: this.config.mode,
+      requestBody,
+      metadata,
+      pricing: this.pricing,
+      tracker: this.usage,
+      dumpApiCall: this._dumpApiCall.bind(this),
+    });
   }
 
   // ------------------------------------------------------------------
@@ -797,22 +655,6 @@ export class GatewayServer {
   // Usage recording
   // ------------------------------------------------------------------
 
-  private async _calculateUsageCost(
-    provider: string,
-    model: string,
-    inputTokens: number,
-    outputTokens: number,
-    cacheCreationInputTokens: number,
-    cacheReadInputTokens: number,
-  ): Promise<number> {
-    if (cacheCreationInputTokens > 0 || cacheReadInputTokens > 0) {
-      return this.pricing.calculateCostWithCacheAsync(
-        provider, model, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens,
-      );
-    }
-    return this.pricing.calculateCostAsync(provider, model, inputTokens, outputTokens);
-  }
-
   private async _recordUsageIfPossible(
     backend: Backend,
     responseBody: Buffer,
@@ -823,79 +665,17 @@ export class GatewayServer {
   ): Promise<void> {
     const usage = parseUsageResponse(responseBody, originalModel);
     if (!usage) return;
-
-    const provider = inferProvider(backend, usage.model);
-    const model = usage.model || `${provider}/unknown`;
-    const cost = await this._calculateUsageCost(
-      provider, model, usage.inputTokens, usage.outputTokens,
-      usage.cacheCreationInputTokens, usage.cacheReadInputTokens,
-    );
-    this.usage.recordUsage({
-      provider, model, cost, metadata,
-      input_tokens: usage.inputTokens,
-      output_tokens: usage.outputTokens,
-      cache_creation_input_tokens: usage.cacheCreationInputTokens,
-      cache_read_input_tokens: usage.cacheReadInputTokens,
-      latency_ms: elapsedMs,
-      fallback: backend.id.includes(":fb:"),
-      billing_mode: billingMode || this.config.mode,
+    await recordGatewayUsage({
+      backend, usage, elapsedMs, billingMode, metadata,
+      defaultBillingMode: this.config.mode,
+      pricing: this.pricing,
+      tracker: this.usage,
     });
   }
 
   // ------------------------------------------------------------------
-  // Info endpoints
+  // Mode switch
   // ------------------------------------------------------------------
-
-  private _handleHealth(res: http.ServerResponse): void {
-    jsonResponse(res, 200, {
-      status: "ok",
-      mode: this.config.mode,
-      endpoints: Object.keys(this.config.endpoints),
-    });
-  }
-
-  private _handleStatus(res: http.ServerResponse): void {
-    const info: Record<string, unknown> = {};
-    for (const [epName, ep] of Object.entries(this.config.endpoints)) {
-      const epInfo: { backends: Array<Record<string, unknown>>; mode: string } = {
-        backends: [],
-        mode: "passthrough",
-      };
-      for (let i = 0; i < ep.keys.length; i++) {
-        const bid = `${epName}:key:${i}`;
-        epInfo.backends.push({ id: bid, type: "primary", healthy: this.health.isHealthy(bid) });
-      }
-      if (ep.keys.length === 0 || ep.passthrough) {
-        const bid = `${epName}:passthrough`;
-        epInfo.backends.push({ id: bid, type: "passthrough", healthy: this.health.isHealthy(bid) });
-      }
-      if (ep.keys.length > 0 && ep.passthrough) {
-        epInfo.mode = "hybrid";
-      } else if (ep.keys.length > 0) {
-        epInfo.mode = "managed";
-      }
-      for (const fb of ep.fallbacks) {
-        const bid = `${epName}:fb:${fb.name}`;
-        epInfo.backends.push({
-          id: bid, type: "fallback", name: fb.name,
-          healthy: this.health.isHealthy(bid),
-        });
-      }
-      info[epName] = epInfo;
-    }
-
-    const healthSummary = this.health.summary();
-    const modelHealth = healthSummary.model_health;
-    delete healthSummary.model_health;
-
-    jsonResponse(res, 200, {
-      mode: this.config.mode,
-      available_modes: Object.keys(this.config.endpoint_modes),
-      endpoints: info,
-      health_detail: healthSummary,
-      model_health: modelHealth ?? {},
-    });
-  }
 
   private async _handleModeSwitch(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const body = await readBody(req);
@@ -920,119 +700,6 @@ export class GatewayServer {
     this.config.endpoints = this.config.endpoint_modes[mode];
     console.log(`[gateway] Switched mode ${previous} -> ${mode}`);
     return jsonResponse(res, 200, { ok: true, mode, previous });
-  }
-
-  private _handleUsage(query: Record<string, string>, res: http.ServerResponse): void {
-    if (query.format === "records") {
-      const records = this.usage.storage.read("all");
-      let filtered = records;
-      if (query.since) {
-        const sinceDate = new Date(query.since);
-        if (!isNaN(sinceDate.getTime())) {
-          filtered = records.filter(record => {
-            const ts = new Date(record.ts as string);
-            return !isNaN(ts.getTime()) && ts > sinceDate;
-          });
-        }
-      }
-      const limit = Math.max(0, asInt(query.limit ?? 1000));
-      const offset = Math.max(0, asInt(query.offset ?? 0));
-      const paged = limit > 0 ? filtered.slice(offset, offset + limit) : filtered.slice(offset);
-      return jsonResponse(res, 200, { records: paged });
-    }
-
-    const period = query.period ?? "today";
-    const groupBy = query.group_by ?? "";
-
-    const validPeriods = ["today", "week", "month", "all"];
-    if (!validPeriods.includes(period)) {
-      return jsonResponse(res, 400, {
-        error: { message: `Invalid period: ${period}. Must be one of ${validPeriods.join(",")}`, type: "gateway_error" },
-      });
-    }
-
-    const validGroups = ["", "model", "provider"];
-    if (!validGroups.includes(groupBy)) {
-      return jsonResponse(res, 400, {
-        error: { message: `Invalid group_by: ${groupBy}. Must be one of model,provider`, type: "gateway_error" },
-      });
-    }
-
-    const result: Record<string, unknown> = { summary: this.usage.summary(period) };
-    if (groupBy === "model") result.models = this.usage.byModel(period);
-    else if (groupBy === "provider") result.providers = this.usage.byProvider(period);
-
-    jsonResponse(res, 200, result);
-  }
-
-  // ------------------------------------------------------------------
-  // Global model health precheck
-  // ------------------------------------------------------------------
-
-  private async _applyGlobalModelHealthPrecheck(): Promise<void> {
-    if (!this.config.status_check) return;
-
-    const modelTargets = new Set<string>();
-    for (const endpoint of Object.values(this.config.endpoints)) {
-      for (const model of Object.keys(endpoint.model_fallbacks)) {
-        modelTargets.add(model);
-      }
-      for (const candidates of Object.values(endpoint.model_fallbacks)) {
-        for (const c of candidates) modelTargets.add(c);
-      }
-    }
-
-    if (modelTargets.size === 0) return;
-
-    // Import StatusAPI from the SDK
-    const { StatusAPI } = await import("../api.js");
-    const { Status } = await import("../models.js");
-    const client = new StatusAPI();
-
-    const sorted = [...modelTargets].sort();
-    const results = await Promise.allSettled(
-      sorted.map(m => client.checkModel(m))
-    );
-
-    const degradedModels = new Set<string>();
-    for (let i = 0; i < sorted.length; i++) {
-      const result = results[i];
-      if (result.status === "fulfilled") {
-        const check = result.value;
-        if (check.status === Status.DEGRADED || check.status === Status.DOWN) {
-          degradedModels.add(sorted[i]);
-        }
-      }
-    }
-
-    if (degradedModels.size === 0) return;
-
-    for (const endpoint of Object.values(this.config.endpoints)) {
-      const epModels = new Set<string>(Object.keys(endpoint.model_fallbacks));
-      for (const candidates of Object.values(endpoint.model_fallbacks)) {
-        for (const c of candidates) epModels.add(c);
-      }
-      const unhealthyModels = [...epModels].filter(m => degradedModels.has(m));
-      if (unhealthyModels.length === 0) continue;
-
-      const backendIds: string[] = [];
-      for (let i = 0; i < endpoint.keys.length; i++) {
-        backendIds.push(`${endpoint.name}:key:${i}`);
-      }
-      if (endpoint.keys.length === 0 || endpoint.passthrough) {
-        backendIds.push(`${endpoint.name}:passthrough`);
-      }
-      for (const fb of endpoint.fallbacks) {
-        backendIds.push(`${endpoint.name}:fb:${fb.name}`);
-      }
-
-      for (const backendId of backendIds) {
-        for (const model of unhealthyModels) {
-          this.health.recordError(backendId, 529, model);
-          console.log(`[gateway] Pre-marked ${backendId} model unhealthy from global status: ${model}`);
-        }
-      }
-    }
   }
 
   // ------------------------------------------------------------------
@@ -1096,223 +763,5 @@ export class GatewayServer {
     console.log(`  Health:  ${base}/health`);
     console.log(`  Usage:   ${base}/usage?period=today&group_by=model`);
     console.log();
-  }
-}
-
-// ------------------------------------------------------------------
-// Helpers
-// ------------------------------------------------------------------
-
-function parseUrlMetadata(raw: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const pair of raw.split(",")) {
-    const eqIdx = pair.indexOf("=");
-    if (eqIdx > 0) {
-      result[decodeURIComponent(pair.slice(0, eqIdx))] = decodeURIComponent(pair.slice(eqIdx + 1));
-    }
-  }
-  return result;
-}
-
-function jsonResponse(res: http.ServerResponse, status: number, data: unknown): void {
-  const body = JSON.stringify(data);
-  res.writeHead(status, { "content-type": "application/json" });
-  res.end(body);
-}
-
-const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB
-
-function readBody(req: http.IncomingMessage): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    req.on("data", (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > MAX_BODY_SIZE) {
-        req.destroy();
-        reject(new Error("Request body too large"));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
-  });
-}
-
-function extractModel(body: Buffer): string {
-  if (body.length === 0) return "";
-  try {
-    return JSON.parse(body.toString("utf-8")).model ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function primaryBackend(bid: string, endpoint: EndpointConfig, apiKey: string): Backend {
-  return {
-    id: bid,
-    base_url: endpoint.base_url,
-    api_key: apiKey,
-    auth_style: endpoint.auth_style,
-    model_prefix: "",
-    model_map: {},
-    translate: null,
-  };
-}
-
-function extractIncomingKey(req: http.IncomingMessage, authStyle: string): string {
-  if (authStyle === "anthropic") {
-    return (req.headers["x-api-key"] as string) ?? "";
-  }
-  if (authStyle === "google") {
-    return (req.headers["x-goog-api-key"] as string) ?? "";
-  }
-  // bearer
-  const auth = (req.headers.authorization as string) ?? "";
-  if (auth.toLowerCase().startsWith("bearer ")) {
-    return auth.slice(7);
-  }
-  return auth;
-}
-
-function buildUpstreamHeaders(req: http.IncomingMessage, backend: Backend): Record<string, string> {
-  const headers: Record<string, string> = {};
-  const skip = new Set([
-    "host", "authorization", "x-api-key", "x-goog-api-key",
-    "content-length", "transfer-encoding", "connection",
-  ]);
-
-  for (const [k, v] of Object.entries(req.headers)) {
-    if (!skip.has(k.toLowerCase()) && typeof v === "string") {
-      headers[k] = v;
-    }
-  }
-
-  // Set upstream auth
-  const style = AUTH_STYLES[backend.auth_style] ?? AUTH_STYLES.bearer;
-  const [headerName, prefix] = style;
-  headers[headerName] = prefix + backend.api_key;
-
-  return headers;
-}
-
-function replaceModel(body: Buffer, model: string): Buffer {
-  try {
-    const data = JSON.parse(body.toString("utf-8"));
-    if (!data.model) return body;
-    data.model = model;
-    return Buffer.from(JSON.stringify(data), "utf-8");
-  } catch {
-    return body;
-  }
-}
-
-function mapModel(body: Buffer, backend: Backend): Buffer {
-  try {
-    const data = JSON.parse(body.toString("utf-8"));
-    const model = data.model;
-    if (!model) return body;
-
-    if (model in backend.model_map) {
-      data.model = backend.model_map[model];
-    } else if (backend.model_prefix) {
-      data.model = backend.model_prefix + model;
-    }
-    return Buffer.from(JSON.stringify(data), "utf-8");
-  } catch {
-    return body;
-  }
-}
-
-function parseUsageResponse(responseBody: Buffer, originalModel: string): ParsedUsage | null {
-  let payload: Record<string, unknown>;
-  try {
-    payload = JSON.parse(responseBody.toString("utf-8"));
-  } catch {
-    return null;
-  }
-
-  const model = originalModel || (payload.model as string) || "";
-  const usage = (payload.usage as Record<string, unknown>) ?? {};
-  const parsed = {
-    model,
-    inputTokens: asInt(usage.input_tokens ?? usage.prompt_tokens ?? 0),
-    outputTokens: asInt(usage.output_tokens ?? usage.completion_tokens ?? 0),
-    cacheCreationInputTokens: asInt(usage.cache_creation_input_tokens ?? 0),
-    cacheReadInputTokens: asInt(usage.cache_read_input_tokens ?? 0),
-  };
-  return model || parsed.inputTokens || parsed.outputTokens ? parsed : null;
-}
-
-function inferProvider(backend: Backend, model: string): string {
-  if (model.includes("/")) return model.split("/", 1)[0];
-  const bid = backend.id;
-  if (bid.startsWith("anthropic")) return "anthropic";
-  if (bid.startsWith("openai")) return "openai";
-  if (bid.startsWith("google")) return "google";
-  if (bid.startsWith("openrouter")) return "openrouter";
-  return bid.split(":", 1)[0] || "unknown";
-}
-
-/**
- * Check whether the request has Anthropic extended thinking enabled.
- * Looks for the "thinking" top-level field with type "enabled" or "auto".
- */
-function hasThinkingEnabled(body: Buffer): boolean {
-  try {
-    const data = JSON.parse(body.toString("utf-8"));
-    const thinking = data.thinking;
-    if (!thinking || typeof thinking !== "object") return false;
-    const t = (thinking as Record<string, unknown>).type;
-    return t === "enabled" || t === "auto";
-  } catch {
-    return false;
-  }
-}
-
-/**
- * DeepSeek API requires every assistant message in a multi-turn conversation to
- * carry its reasoning_content (even when empty). If the client dropped an empty
- * thinking block, re-inject it so the upstream doesn't reject the request.
- */
-function ensureThinkingBlocks(body: Buffer): Buffer {
-  try {
-    const data = JSON.parse(body.toString("utf-8"));
-    const messages = data.messages;
-    if (!Array.isArray(messages)) return body;
-
-    let modified = false;
-    for (const msg of messages) {
-      if (msg.role !== "assistant") continue;
-      const content = msg.content;
-      if (!Array.isArray(content)) continue;
-
-      const hasThinking = content.some(
-        (b: Record<string, unknown>) => b.type === "thinking",
-      );
-      if (hasThinking) continue;
-
-      const firstTextIdx = content.findIndex(
-        (b: Record<string, unknown>) => b.type === "text",
-      );
-      if (firstTextIdx < 0) continue;
-
-      content.splice(firstTextIdx, 0, { type: "thinking", thinking: "" });
-      modified = true;
-    }
-
-    return modified ? Buffer.from(JSON.stringify(data), "utf-8") : body;
-  } catch {
-    return body;
-  }
-}
-
-function asInt(value: unknown): number {
-  try {
-    const n = Number(value ?? 0);
-    return Number.isFinite(n) ? Math.floor(n) : 0;
-  } catch {
-    return 0;
   }
 }

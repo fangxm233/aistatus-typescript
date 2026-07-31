@@ -4,7 +4,7 @@
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -45,20 +45,37 @@ function getFreePort() {
   });
 }
 
-function makeServer(config, port) {
-  return import("../dist/gateway/index.js").then(({ GatewayServer }) => {
-    config.port = port;
-    const server = new GatewayServer(config);
-    const httpServer = http.createServer((req, res) => {
-      server._handleRequest(req, res).catch(() => {
-        if (!res.headersSent) {
-          res.writeHead(500);
-          res.end();
-        }
-      });
-    });
-    return { server, httpServer };
+const originalHome = process.env.HOME;
+const suiteHome = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-gateway-mode-home-"));
+const serverTempDirs = [];
+process.env.HOME = suiteHome;
+
+after(() => {
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  for (const tmpDir of serverTempDirs) fs.rmSync(tmpDir, { recursive: true, force: true });
+  fs.rmSync(suiteHome, { recursive: true, force: true });
+});
+
+async function makeServer(config, port) {
+  const { GatewayServer } = await import("../dist/gateway/index.js");
+  const { UsageStorage, UsageTracker } = await import("../dist/index.js");
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-gateway-mode-"));
+  serverTempDirs.push(tmpDir);
+  config.port = port;
+  const server = new GatewayServer(config);
+  server.usage = new UsageTracker(new UsageStorage(tmpDir, "/gateway-mode"), null);
+  server.pricing.getPricing = () => ({
+    input_per_million: 5, output_per_million: 25,
+    input_cache_read_per_million: 0.5, input_cache_write_per_million: 6.25,
   });
+  const httpServer = http.createServer((req, res) => {
+    server._handleRequest(req, res).catch(() => {
+      if (!res.headersSent) res.writeHead(500);
+      res.end();
+    });
+  });
+  return { server, httpServer };
 }
 
 test("Gateway per-request mode: /m/{mode}/{ep}/{path} resolves correct endpoint", async () => {
@@ -199,15 +216,6 @@ test("Gateway per-request mode: /m/{mode}/{metadata}/{ep}/{path} records metadat
   };
 
   const { server, httpServer } = await makeServer(config, freePort);
-  const { UsageStorage, UsageTracker } = await import("../dist/index.js");
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-gateway-mode-"));
-  server.usage = new UsageTracker(new UsageStorage(tmpDir, "/metadata"), null);
-  server.pricing.getPricing = () => ({
-    input_per_million: 5,
-    output_per_million: 25,
-    input_cache_read_per_million: 0.5,
-    input_cache_write_per_million: 6.25,
-  });
   await new Promise((resolve) => httpServer.listen(freePort, "127.0.0.1", resolve));
 
   try {
@@ -232,7 +240,6 @@ test("Gateway per-request mode: /m/{mode}/{metadata}/{ep}/{path} records metadat
   } finally {
     httpServer.close();
     upstream.close();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 

@@ -1,5 +1,13 @@
+// input:  built CostCalculator, stubbed fetch, temporary cache files
+// output: pricing arithmetic, cache, and refresh-sharing regressions
+// pos:    CostCalculator behavior regression tests
+// >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
+
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 test("CostCalculator.calculateCost computes correctly with cached pricing", async () => {
   const { CostCalculator } = await import("../dist/index.js");
@@ -117,6 +125,48 @@ test("CostCalculator.calculateCostWithCache falls back to multipliers when cache
   // Fallback: cache_write = 1.25x input, cache_read = 0.10x input
   // Same result as before: 0.0195
   assert.equal(cost, 0.0195);
+});
+
+test("CostCalculator shares one in-flight refresh across concurrent callers", async () => {
+  const { CostCalculator } = await import("../dist/index.js");
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-pricing-concurrent-"));
+  const calc = new CostCalculator("https://aistatus.cc", 3600);
+  calc._cachePath = path.join(tmpDir, "pricing-cache.json");
+  const savedFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  let releaseFetch = () => {};
+  let markFetchStarted;
+  const fetchStarted = new Promise((resolve) => { markFetchStarted = resolve; });
+  const fetchGate = new Promise((resolve) => { releaseFetch = resolve; });
+
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    markFetchStarted();
+    await fetchGate;
+    return new Response(JSON.stringify({
+      models: [{
+        id: "anthropic/claude-sonnet-4-6",
+        pricing: { prompt: 0.000005, completion: 0.000025 },
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  const costs = [
+    calc.calculateCostAsync("anthropic", "claude-sonnet-4-6", 1_000_000, 1_000_000),
+    calc.calculateCostAsync("ignored", "anthropic/claude-sonnet-4-6", 1_000_000, 1_000_000),
+  ];
+  try {
+    await fetchStarted;
+    assert.equal(fetchCalls, 1);
+    releaseFetch();
+    assert.deepEqual(await Promise.all(costs), [30, 30]);
+    assert.equal(fetchCalls, 1);
+  } finally {
+    releaseFetch();
+    await Promise.allSettled(costs);
+    globalThis.fetch = savedFetch;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test("CostCalculator.getPricing returns cache miss immediately and refreshes asynchronously", async () => {

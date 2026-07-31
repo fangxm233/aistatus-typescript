@@ -6,13 +6,13 @@ SDK 回归测试目录，覆盖 config、gateway server、usage、router、healt
 | filename | role | function |
 |---|---|---|
 | `config.test.mjs` | regression test | Verify auto-discovery plus flat/mode-aware gateway config parsing |
-| `server.test.mjs` | integration test | Exercise gateway endpoints, usage records, and pricing refresh accounting |
+| `server.test.mjs` | integration test | Exercise gateway endpoints plus JSON/SSE pricing accounting |
 | `usage.test.mjs` | regression test | Verify usage persistence, aggregation, and billing_mode recording |
 | `health.test.mjs` | regression test | Verify backend/model health tracking and recovery |
 | `router.test.mjs` | regression test | Verify routing fallback behavior and provider alias handling |
 | `status-api.test.mjs` | regression test | Verify StatusAPI response parsing and provider normalization |
 | `translate.test.mjs` | regression test | Verify Anthropic↔OpenAI payload and SSE translation |
-| `pricing.test.mjs` | regression test | Verify token pricing cost calculation behavior including cache-aware costs |
+| `pricing.test.mjs` | regression test | Verify pricing arithmetic, caching, and shared refreshes |
 | `router-advanced.test.mjs` | regression test | Verify router health tracking, model fallback chains, 429 retry, cache tokens, and streaming |
 | `uploader.test.mjs` | regression test | Verify upload payload construction, config gating, and silent fire-and-forget fetch behavior |
 | `gateway-mode.test.mjs` | integration test | Verify isolated per-request mode routing and metadata usage |

@@ -8,6 +8,11 @@ Gateway 子模块：解析 gateway 配置、维护健康状态，并暴露 HTTP 
 | `index.ts` | public entry | Re-export gateway server/config helpers, bootstrap `startGateway()`, and watch the config file for hot reload via `watchConfigFile()` |
 | `auth.ts` | auth checker | Pure-function gateway API key authentication (Bearer/custom header, public path bypass) |
 | `config.ts` | config parser | Load flat or mode-aware nested gateway configs, auth config, and auto-discover env-based defaults |
-| `server.ts` | HTTP runtime | Proxy requests and persist usage after refresh-aware pricing |
+| `server.ts` | HTTP runtime | Dispatch proxy requests and coordinate Gateway modules |
+| `server-types.ts` | types | Define internal backend and usage contracts |
+| `server-helpers.ts` | helpers | Transform HTTP headers, bodies, models, and usage |
+| `server-info.ts` | info API | Serve health, status, usage, and model prechecks |
+| `stream-response.ts` | streaming | Forward SSE and persist stream usage |
+| `usage-accounting.ts` | accounting | Price and persist JSON or SSE usage |
 | `health.ts` | health tracker | Track backend/model health and cooldown state for failover |
 | `translate.ts` | protocol adapter | Translate Anthropic requests/responses/SSE to OpenAI-compatible payloads |
