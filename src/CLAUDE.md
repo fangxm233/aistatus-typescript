@@ -5,7 +5,8 @@ TypeScript SDK 源码目录，包含主 SDK 导出、gateway 配置/服务与共
 
 | filename | role | function |
 |---|---|---|
-| `index.ts` | package entry | Register built-in providers, expose the public SDK API surface, and define the release VERSION constant |
+| `index.ts` | package entry | Register providers and expose the public SDK API |
+| `version.ts` | release metadata | Define the public runtime package version |
 | `models.ts` | type definitions | Core types: RouteResponse (with cache tokens), RouteOptions (with modelFallbacks/retry), StreamChunk (with error), ContentBlock (TextBlock/ImageUrlBlock/ImageBase64Block), ResponseFormat |
 | `content.ts` | content helpers | extractTextFromContent and normalizeContent for converting between string and ContentBlock[] |
 | `stream.ts` | stream utilities | streamToReadable: converts routeStream() AsyncGenerator to Web ReadableStream<string> |

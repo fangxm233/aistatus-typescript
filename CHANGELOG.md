@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.8 — 2026-07-31
+
+### Fixes
+
+- **Gateway pricing refresh accounting** — usage persistence now waits for a deduplicated pricing refresh when the cache is missing or expired, so the first request records its cache-aware cost instead of `0`. A failed refresh remains fail-open and records the request with cost `0`.
+
 ## 0.0.7 — 2026-06-04
 
 ### Fixes
