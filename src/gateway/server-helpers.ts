@@ -1,11 +1,11 @@
 // input:  HTTP messages, endpoint config, provider payloads
-// output: Gateway header, body, model, and usage transformations
+// output: Gateway HTTP, body, model, and usage transforms
 // pos:    Pure helpers for the Gateway HTTP runtime
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
 import * as http from "node:http";
 
-import { AUTH_STYLES, type EndpointConfig } from "./config.js";
+import { AUTH_STYLES, DEFAULT_MAX_BODY_SIZE_MB, type EndpointConfig } from "./config.js";
 import type { Backend, GatewayUsage } from "./server-types.js";
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -13,7 +13,7 @@ const HOP_BY_HOP_HEADERS = new Set([
   "te", "trailer", "transfer-encoding", "upgrade", "content-length",
   "content-encoding", "content-type",
 ]);
-const MAX_BODY_SIZE = 10 * 1024 * 1024;
+const BYTES_PER_MIB = 1024 * 1024;
 
 export function forwardUpstreamHeaders(upstream: Response, target: Record<string, string>): void {
   upstream.headers.forEach((value, key) => {
@@ -38,13 +38,17 @@ export function jsonResponse(res: http.ServerResponse, status: number, data: unk
   res.end(JSON.stringify(data));
 }
 
-export function readBody(req: http.IncomingMessage): Promise<Buffer> {
+export function readBody(
+  req: http.IncomingMessage,
+  maxBodySizeMb = DEFAULT_MAX_BODY_SIZE_MB,
+): Promise<Buffer> {
+  const maxBodySizeBytes = maxBodySizeMb * BYTES_PER_MIB;
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     req.on("data", (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_BODY_SIZE) {
+      if (size > maxBodySizeBytes) {
         req.destroy();
         reject(new Error("Request body too large"));
         return;

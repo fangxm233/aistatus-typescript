@@ -1,15 +1,7 @@
-/**
- * Gateway entry point.
- *
- * Usage:
- *   import { startGateway } from "aistatus/gateway";
- *   startGateway({ port: 9880 });
- */
-
-// input: CLI/startup options and gateway config loading helpers
-// output: gateway server exports plus startGateway() bootstrap helper for consumers
-// pos: public gateway module surface that re-exports config/server types, starts the HTTP gateway, and watches the config file for hot reload
-// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
+// input:  CLI options, gateway config, filesystem watcher
+// output: Public gateway exports and startGateway()
+// pos:    Gateway package entry point
+// >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -22,6 +14,7 @@ export {
   generateConfig,
   fromDict,
   DEFAULT_BASE_URLS,
+  DEFAULT_MAX_BODY_SIZE_MB,
   AUTH_STYLES,
   RESERVED_KEYS,
 } from "./config.js";

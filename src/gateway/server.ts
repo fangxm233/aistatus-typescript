@@ -1,5 +1,5 @@
 // input:  GatewayConfig, HTTP requests, provider responses
-// output: proxied responses and persisted Gateway usage records
+// output: Proxy responses and persisted usage records
 // pos:    Gateway HTTP routing and accounting runtime
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
@@ -266,7 +266,7 @@ export class GatewayServer {
       });
     }
 
-    const body = await readBody(req);
+    const body = await readBody(req, this.config.max_body_size_mb);
     const originalModel = extractModel(body);
     let backends = this._buildBackendList(endpoint, req);
 
@@ -678,7 +678,7 @@ export class GatewayServer {
   // ------------------------------------------------------------------
 
   private async _handleModeSwitch(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const body = await readBody(req);
+    const body = await readBody(req, this.config.max_body_size_mb);
     let payload: Record<string, unknown>;
     try {
       payload = body.length > 0 ? JSON.parse(body.toString("utf-8")) : {};

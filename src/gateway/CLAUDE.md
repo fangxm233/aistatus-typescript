@@ -5,12 +5,12 @@ Gateway 子模块：解析 gateway 配置、维护健康状态，并暴露 HTTP 
 
 | filename | role | function |
 |---|---|---|
-| `index.ts` | public entry | Re-export gateway server/config helpers, bootstrap `startGateway()`, and watch the config file for hot reload via `watchConfigFile()` |
+| `index.ts` | 入口 | 导出网关 API 并启动或热加载配置 |
 | `auth.ts` | auth checker | Pure-function gateway API key authentication (Bearer/custom header, public path bypass) |
-| `config.ts` | config parser | Load flat or mode-aware nested gateway configs, auth config, and auto-discover env-based defaults |
+| `config.ts` | 配置 | 解析网关配置、请求限额与模式 |
 | `server.ts` | HTTP runtime | Dispatch proxy requests and coordinate Gateway modules |
 | `server-types.ts` | types | Define internal backend and usage contracts |
-| `server-helpers.ts` | helpers | Transform HTTP headers, bodies, models, and usage |
+| `server-helpers.ts` | 工具 | 转换请求头、请求体、模型与用量 |
 | `server-info.ts` | info API | Serve health, status, usage, and model prechecks |
 | `stream-response.ts` | streaming | Forward SSE and persist stream usage |
 | `usage-accounting.ts` | accounting | Price and persist JSON or SSE usage |

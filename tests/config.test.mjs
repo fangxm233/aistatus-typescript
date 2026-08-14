@@ -1,13 +1,13 @@
+// input:  built config exports, temp env and filesystem
+// output: Gateway and SDK configuration regression tests
+// pos:    Configuration parser and persistence test suite
+// >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
-// input: built gateway config exports from dist, SDK config exports, and temporary environment variables/filesystem state
-// output: regression tests for gateway config parsing plus SDK persistent config precedence and YAML file I/O
-// pos: config compatibility tests covering gateway config parsing and the public SDK upload configuration surface
-// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
 
 // Config tests: test autoDiscover, fromDict mode parsing, generateConfig, and SDK persistent config helpers
 
@@ -116,6 +116,38 @@ test("fromDict keeps flat config backward compatible", async () => {
   assert.deepEqual(Object.keys(config.endpoint_modes), ["default"]);
   assert.equal(config.endpoints.openai.base_url, "https://api.openai.com");
   assert.equal(config.endpoint_modes.default.openai.keys[0], "sk-test");
+});
+
+test("fromDict defaults max_body_size_mb to 100", async () => {
+  const { fromDict } = await import("../dist/gateway/index.js");
+
+  assert.equal(fromDict({}).max_body_size_mb, 100);
+});
+
+test("fromDict parses max_body_size_mb as reserved gateway config", async () => {
+  const { fromDict } = await import("../dist/gateway/index.js");
+
+  const config = fromDict({
+    max_body_size_mb: 64,
+    openai: {
+      base_url: "https://api.openai.com",
+      auth_style: "openai",
+    },
+  });
+
+  assert.equal(config.max_body_size_mb, 64);
+  assert.ok(!("max_body_size_mb" in config.endpoints));
+});
+
+test("fromDict rejects invalid max_body_size_mb values", async () => {
+  const { fromDict } = await import("../dist/gateway/index.js");
+
+  for (const value of [0, -1, Number.POSITIVE_INFINITY, "100"]) {
+    assert.throws(
+      () => fromDict({ max_body_size_mb: value }),
+      /max_body_size_mb must be a finite number greater than zero/,
+    );
+  }
 });
 
 // ─── Fix 1: arbitrary endpoint names (no hardcoded provider whitelist) ─────

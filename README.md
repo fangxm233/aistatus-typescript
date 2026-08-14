@@ -353,6 +353,7 @@ A typical configuration:
 
 ```yaml
 port: 9880
+max_body_size_mb: 100
 
 anthropic:
   keys:
@@ -379,6 +380,8 @@ openai:
 ```
 
 Environment variable references (`$VAR_NAME`) are resolved at load time.
+`max_body_size_mb` limits each buffered request body in MiB and defaults to
+`100`. Config-file hot reload applies a changed limit to subsequent requests.
 
 ### How the Gateway Routes Requests
 

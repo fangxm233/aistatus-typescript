@@ -1,12 +1,7 @@
-/**
- * Gateway configuration: loading, validation, auto-discovery.
- * Compatible with Python SDK gateway.yaml format.
- */
-
-// input: gateway.yaml objects or env vars discovered at runtime
-// output: GatewayConfig objects with active endpoints plus mode-indexed endpoint maps
-// pos: parses gateway configuration for the HTTP server, including backward-compatible flat configs and nested mode-aware configs
-// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
+// input:  gateway.yaml, environment variables
+// output: GatewayConfig parsing, validation, and generation
+// pos:    Gateway runtime configuration source
+// >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -24,12 +19,15 @@ const CONFIG_FILE = path.join(CONFIG_DIR, "gateway.yaml");
  * route arbitrary PI provider names (xai / github-copilot / kimi-coding / etc.) through the
  * gateway without bumping a code-level allowlist on every new provider.
  */
+export const DEFAULT_MAX_BODY_SIZE_MB = 100;
+
 export const RESERVED_KEYS = new Set([
   "host",
   "port",
   "mode",
   "auth",
   "status_check",
+  "max_body_size_mb",
   "endpoint_modes",
   "endpoints",
 ]);
@@ -112,6 +110,7 @@ export interface GatewayConfig {
   host: string;
   port: number;
   status_check: boolean;
+  max_body_size_mb?: number;
   mode: string;
   auth?: GatewayAuthConfig;
   endpoints: Record<string, EndpointConfig>;
@@ -198,10 +197,19 @@ function isFlatEndpointConfig(value: unknown): value is Record<string, unknown> 
   return keys.some(key => ["keys", "base_url", "auth_style", "passthrough", "fallbacks", "model_fallbacks"].includes(key));
 }
 
+function parseMaxBodySizeMb(value: unknown): number {
+  if (value === undefined) return DEFAULT_MAX_BODY_SIZE_MB;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error("max_body_size_mb must be a finite number greater than zero");
+  }
+  return value;
+}
+
 export function fromDict(raw: Record<string, unknown>): GatewayConfig {
   const host = (raw.host as string) ?? "127.0.0.1";
   const port = (raw.port as number) ?? 9880;
   const status_check = raw.status_check !== false;
+  const max_body_size_mb = parseMaxBodySizeMb(raw.max_body_size_mb);
 
   const endpoint_modes: Record<string, Record<string, EndpointConfig>> = {};
   const discoveredModes: string[] = [];
@@ -246,6 +254,7 @@ export function fromDict(raw: Record<string, unknown>): GatewayConfig {
     host,
     port,
     status_check,
+    max_body_size_mb,
     mode: activeMode,
     auth,
     endpoints: endpoint_modes[activeMode],
@@ -295,6 +304,7 @@ export function autoDiscover(host = "127.0.0.1", port = 9880): GatewayConfig {
     host,
     port,
     status_check: true,
+    max_body_size_mb: DEFAULT_MAX_BODY_SIZE_MB,
     mode: "default",
     endpoints,
     endpoint_modes: { default: endpoints },
@@ -324,6 +334,7 @@ export function generateConfig(): string {
 #   npx aistatus-gateway start --auto
 
 port: 9880
+max_body_size_mb: 100
 
 # ── Authentication ─────────────────────────────────────────────
 # auth:
