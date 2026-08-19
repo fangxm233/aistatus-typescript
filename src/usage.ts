@@ -202,76 +202,101 @@ export class UsageTracker {
     return record;
   }
 
-  summary(period = "month"): Record<string, unknown> {
+  report(period = "month", groupBy?: UsageGroupKey): Record<string, unknown> {
     const records = this.storage.read(period);
-    const totalRequests = records.length;
-    const totalInput = records.reduce((s, r) => s + asInt(r.in), 0);
-    const totalOutput = records.reduce((s, r) => s + asInt(r.out), 0);
-    const totalCost = round8(records.reduce((s, r) => s + asFloat(r.cost), 0));
-    const avgLatency = totalRequests
-      ? Math.round((records.reduce((s, r) => s + asInt(r.latency_ms), 0) / totalRequests) * 100) / 100
-      : 0;
-    const fallbackCount = records.filter(r => r.fallback).length;
+    const result: Record<string, unknown> = { summary: summarizeUsage(records, period) };
+    if (groupBy) result[`${groupBy}s`] = groupUsage(records, groupBy);
+    return result;
+  }
 
-    return {
-      period,
-      requests: totalRequests,
-      input_tokens: totalInput,
-      output_tokens: totalOutput,
-      cost_usd: totalCost,
-      avg_latency_ms: avgLatency,
-      fallback_requests: fallbackCount,
-    };
+  summary(period = "month"): Record<string, unknown> {
+    return summarizeUsage(this.storage.read(period), period);
   }
 
   byModel(period = "month"): Array<Record<string, unknown>> {
-    return this._groupBy("model", period);
+    return groupUsage(this.storage.read(period), "model");
   }
 
   byProvider(period = "month"): Array<Record<string, unknown>> {
-    return this._groupBy("provider", period);
+    return groupUsage(this.storage.read(period), "provider");
   }
+}
 
-  private _groupBy(key: string, period: string): Array<Record<string, unknown>> {
-    const buckets = new Map<string, {
-      requests: number;
-      input_tokens: number;
-      output_tokens: number;
-      cost_usd: number;
-      fallback_requests: number;
-      latency_sum: number;
-    }>();
+type UsageGroupKey = "model" | "provider";
 
-    for (const record of this.storage.read(period)) {
-      const bucketKey = String(record[key] ?? "unknown");
-      let bucket = buckets.get(bucketKey);
-      if (!bucket) {
-        bucket = { requests: 0, input_tokens: 0, output_tokens: 0, cost_usd: 0, fallback_requests: 0, latency_sum: 0 };
-        buckets.set(bucketKey, bucket);
-      }
-      bucket.requests++;
-      bucket.input_tokens += asInt(record.in);
-      bucket.output_tokens += asInt(record.out);
-      bucket.cost_usd = round8(bucket.cost_usd + asFloat(record.cost));
-      if (record.fallback) bucket.fallback_requests++;
-      bucket.latency_sum += asInt(record.latency_ms);
-    }
+interface UsageBucket {
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  fallback_requests: number;
+  latency_sum: number;
+}
 
-    const rows: Array<Record<string, unknown>> = [];
-    for (const [bucketKey, bucket] of buckets) {
-      rows.push({
-        [key]: bucketKey,
-        requests: bucket.requests,
-        input_tokens: bucket.input_tokens,
-        output_tokens: bucket.output_tokens,
-        cost_usd: bucket.cost_usd,
-        avg_latency_ms: bucket.requests ? Math.round((bucket.latency_sum / bucket.requests) * 100) / 100 : 0,
-        fallback_requests: bucket.fallback_requests,
-      });
-    }
-    rows.sort((a, b) => (asFloat(b.cost_usd) - asFloat(a.cost_usd)) || String(a[key] ?? "").localeCompare(String(b[key] ?? "")));
-    return rows;
+function summarizeUsage(records: Array<Record<string, unknown>>, period: string): Record<string, unknown> {
+  const totalRequests = records.length;
+  const totalInput = records.reduce((sum, record) => sum + asInt(record.in), 0);
+  const totalOutput = records.reduce((sum, record) => sum + asInt(record.out), 0);
+  const totalCost = round8(records.reduce((sum, record) => sum + asFloat(record.cost), 0));
+  const latencySum = records.reduce((sum, record) => sum + asInt(record.latency_ms), 0);
+  return {
+    period,
+    requests: totalRequests,
+    input_tokens: totalInput,
+    output_tokens: totalOutput,
+    cost_usd: totalCost,
+    avg_latency_ms: totalRequests ? Math.round((latencySum / totalRequests) * 100) / 100 : 0,
+    fallback_requests: records.filter(record => record.fallback).length,
+  };
+}
+
+function groupUsage(
+  records: Array<Record<string, unknown>>,
+  key: UsageGroupKey,
+): Array<Record<string, unknown>> {
+  const buckets = new Map<string, UsageBucket>();
+  for (const record of records) {
+    const bucketKey = String(record[key] ?? "unknown");
+    const bucket = buckets.get(bucketKey) ?? emptyUsageBucket();
+    addToUsageBucket(bucket, record);
+    buckets.set(bucketKey, bucket);
   }
+  const rows = [...buckets].map(([bucketKey, bucket]) => usageBucketRow(key, bucketKey, bucket));
+  rows.sort((a, b) => (asFloat(b.cost_usd) - asFloat(a.cost_usd))
+    || String(a[key] ?? "").localeCompare(String(b[key] ?? "")));
+  return rows;
+}
+
+function emptyUsageBucket(): UsageBucket {
+  return {
+    requests: 0, input_tokens: 0, output_tokens: 0,
+    cost_usd: 0, fallback_requests: 0, latency_sum: 0,
+  };
+}
+
+function addToUsageBucket(bucket: UsageBucket, record: Record<string, unknown>): void {
+  bucket.requests++;
+  bucket.input_tokens += asInt(record.in);
+  bucket.output_tokens += asInt(record.out);
+  bucket.cost_usd = round8(bucket.cost_usd + asFloat(record.cost));
+  if (record.fallback) bucket.fallback_requests++;
+  bucket.latency_sum += asInt(record.latency_ms);
+}
+
+function usageBucketRow(
+  key: UsageGroupKey,
+  bucketKey: string,
+  bucket: UsageBucket,
+): Record<string, unknown> {
+  return {
+    [key]: bucketKey,
+    requests: bucket.requests,
+    input_tokens: bucket.input_tokens,
+    output_tokens: bucket.output_tokens,
+    cost_usd: bucket.cost_usd,
+    avg_latency_ms: bucket.requests ? Math.round((bucket.latency_sum / bucket.requests) * 100) / 100 : 0,
+    fallback_requests: bucket.fallback_requests,
+  };
 }
 
 function asInt(v: unknown): number {

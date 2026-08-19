@@ -211,3 +211,39 @@ test("UsageStorage persists records to JSONL files", async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("UsageTracker builds a grouped report from one storage read", async () => {
+  const { UsageTracker } = await import("../dist/index.js");
+  let reads = 0;
+  const tracker = new UsageTracker({
+    read(period) {
+      reads++;
+      assert.equal(period, "all");
+      return [
+        { provider: "anthropic", in: 10, out: 4, cost: 0.1, latency_ms: 100, fallback: false },
+        { provider: "anthropic", in: 20, out: 6, cost: 0.2, latency_ms: 200, fallback: true },
+        { in: 5, out: 2, cost: 0.3, latency_ms: 300, fallback: false },
+      ];
+    },
+  });
+
+  const report = tracker.report("all", "provider");
+
+  assert.equal(reads, 1);
+  assert.deepEqual(report, {
+    summary: {
+      period: "all", requests: 3, input_tokens: 35, output_tokens: 12,
+      cost_usd: 0.6, avg_latency_ms: 200, fallback_requests: 1,
+    },
+    providers: [
+      {
+        provider: "anthropic", requests: 2, input_tokens: 30, output_tokens: 10,
+        cost_usd: 0.3, avg_latency_ms: 150, fallback_requests: 1,
+      },
+      {
+        provider: "unknown", requests: 1, input_tokens: 5, output_tokens: 2,
+        cost_usd: 0.3, avg_latency_ms: 300, fallback_requests: 0,
+      },
+    ],
+  });
+});

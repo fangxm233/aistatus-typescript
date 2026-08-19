@@ -99,10 +99,8 @@ function handleUsageSummary(
   const groupBy = query.group_by ?? "";
   if (!validateUsageQuery(period, groupBy, res)) return;
 
-  const result: Record<string, unknown> = { summary: tracker.summary(period) };
-  if (groupBy === "model") result.models = tracker.byModel(period);
-  else if (groupBy === "provider") result.providers = tracker.byProvider(period);
-  jsonResponse(res, 200, result);
+  const grouped = groupBy === "model" || groupBy === "provider" ? groupBy : undefined;
+  jsonResponse(res, 200, tracker.report(period, grouped));
 }
 
 function validateUsageQuery(period: string, groupBy: string, res: http.ServerResponse): boolean {

@@ -790,3 +790,43 @@ test("Gateway server /usage validates query params", async () => {
     httpServer.close();
   }
 });
+
+test("Gateway server reads usage once for a grouped report", async () => {
+  const { GatewayServer } = await import("../dist/gateway/index.js");
+  const { UsageTracker, UsageStorage } = await import("../dist/index.js");
+  const config = {
+    host: "127.0.0.1", port: 0, status_check: false, mode: "default",
+    endpoints: {}, endpoint_modes: { default: {} },
+  };
+  const server = new GatewayServer(config);
+  const tmpDir = makeTempUsageTrackerConfig();
+  const storage = new UsageStorage(tmpDir, `/test/grouped-report-${Date.now()}`);
+  storage.append({
+    ts: new Date().toISOString(), provider: "deepseek", model: "deepseek-v4",
+    in: 3, out: 2, cost: 0.5, latency_ms: 100, fallback: false,
+  });
+  const originalRead = storage.read.bind(storage);
+  let reads = 0;
+  storage.read = (...args) => { reads++; return originalRead(...args); };
+  server.usage = new UsageTracker(storage);
+  const httpServer = http.createServer((req, res) => {
+    server._handleRequest(req, res).catch(() => {
+      if (!res.headersSent) res.writeHead(500);
+      res.end();
+    });
+  });
+  await new Promise(resolve => httpServer.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const port = httpServer.address().port;
+    const response = await request(port, "/usage?period=today&group_by=provider");
+    assert.equal(response.status, 200);
+    const body = JSON.parse(response.body);
+    assert.equal(reads, 1);
+    assert.equal(body.summary.requests, 1);
+    assert.equal(body.providers[0].provider, "deepseek");
+  } finally {
+    await new Promise(resolve => httpServer.close(resolve));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
