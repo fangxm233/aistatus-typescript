@@ -12,7 +12,7 @@ Gateway 子模块：解析 gateway 配置、维护健康状态，并暴露 HTTP 
 | `server-types.ts` | types | Define internal backend and usage contracts |
 | `server-helpers.ts` | 工具 | 转换请求头、请求体、模型与用量 |
 | `server-info.ts` | info API | Serve health, status, usage, and model prechecks |
-| `stream-response.ts` | streaming | Forward SSE and persist stream usage |
+| `stream-response.ts` | streaming | Forward complete SSE and abort interrupted streams |
 | `usage-accounting.ts` | accounting | Price and persist JSON or SSE usage |
 | `health.ts` | health tracker | Track backend/model health and cooldown state for failover |
 | `translate.ts` | protocol adapter | Translate Anthropic requests/responses/SSE to OpenAI-compatible payloads |

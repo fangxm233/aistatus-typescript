@@ -1,5 +1,5 @@
 // input:  upstream SSE response, Gateway accounting dependencies
-// output: forwarded SSE events and one persisted stream usage record
+// output: forwarded/aborted SSE and complete-stream usage records
 // pos:    Gateway streaming response and usage pipeline
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
@@ -43,7 +43,17 @@ export async function streamGatewayResponse(options: StreamResponseOptions): Pro
 
   const parser = new StreamUsageParser(options.originalModel);
   const dumpChunks: Buffer[] = [];
-  await pipeStreamWithErrors(options, parser, dumpChunks);
+  let completed: boolean;
+  try {
+    completed = await pipeStreamWithErrors(options, parser, dumpChunks);
+  } catch (error) {
+    abortStream(options.res);
+    throw error;
+  }
+  if (!completed) {
+    abortStream(options.res);
+    return;
+  }
   options.res.end();
   const streamedResponse = dumpChunks.length > 0 ? Buffer.concat(dumpChunks) : undefined;
   options.dumpApiCall(
@@ -51,6 +61,11 @@ export async function streamGatewayResponse(options: StreamResponseOptions): Pro
     options.backend.id, options.elapsedMs,
   );
   if (parser.hasUsage()) await persistStreamUsage(options, parser.usage);
+}
+
+function abortStream(res: http.ServerResponse): void {
+  res.once("error", () => {});
+  res.destroy(new Error("upstream stream interrupted"));
 }
 
 function writeStreamHeaders(options: StreamResponseOptions): void {
@@ -68,11 +83,13 @@ async function pipeStreamWithErrors(
   options: StreamResponseOptions,
   parser: StreamUsageParser,
   dumpChunks: Buffer[],
-): Promise<void> {
+): Promise<boolean> {
   try {
     await pipeStream(options, parser, dumpChunks);
+    return true;
   } catch (error) {
-    writeStreamError(options.res, error);
+    if (error instanceof UpstreamStreamReadError) return parser.hasTerminalEvent();
+    throw error;
   }
 }
 
@@ -91,26 +108,31 @@ async function pipeStream(
   for await (const chunk of chunks) options.res.write(chunk);
 }
 
+class UpstreamStreamReadError extends Error {}
+
+async function readSource(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  try {
+    return await reader.read();
+  } catch {
+    throw new UpstreamStreamReadError("upstream stream read failed");
+  }
+}
+
 async function* sourceChunks(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   parser: StreamUsageParser,
   dumpChunks: Buffer[],
 ): AsyncGenerator<Buffer> {
   while (true) {
-    const { done, value } = await reader.read();
+    const { done, value } = await readSource(reader);
     if (done) return;
     const chunk = Buffer.from(value);
     parser.push(chunk.toString("utf-8"));
     dumpChunks.push(chunk);
     yield chunk;
   }
-}
-
-function writeStreamError(res: http.ServerResponse, error: unknown): void {
-  try {
-    const message = error instanceof Error ? error.message : String(error);
-    res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "stream_error", message } })}\n\n`);
-  } catch { /* response may already be destroyed */ }
 }
 
 async function persistStreamUsage(
@@ -132,6 +154,7 @@ async function persistStreamUsage(
 class StreamUsageParser {
   readonly usage: GatewayUsage;
   private buffer = "";
+  private terminalEvent = false;
 
   constructor(model: string) {
     this.usage = {
@@ -157,16 +180,24 @@ class StreamUsageParser {
     return this.usage.inputTokens > 0 || this.usage.outputTokens > 0;
   }
 
+  hasTerminalEvent(): boolean {
+    return this.terminalEvent;
+  }
+
   private parseLine(line: string): void {
     if (!line.startsWith("data:")) return;
     const payload = line.slice(5).trim();
-    if (payload === "[DONE]") return;
+    if (payload === "[DONE]") {
+      this.terminalEvent = true;
+      return;
+    }
     try {
       this.applyPayload(JSON.parse(payload));
     } catch { /* ignore malformed SSE payloads */ }
   }
 
   private applyPayload(data: any): void {
+    if (data.type === "message_stop") this.terminalEvent = true;
     if (data.type === "message_start" && data.message?.usage) {
       const usage = data.message.usage;
       this.usage.inputTokens = asInt(usage.input_tokens ?? 0);

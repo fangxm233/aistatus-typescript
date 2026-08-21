@@ -37,12 +37,32 @@ function request(port, path, options = {}) {
       (res) => {
         const chunks = [];
         res.on("data", (chunk) => chunks.push(chunk));
+        res.on("aborted", () => reject(new Error("response aborted")));
+        res.on("error", reject);
         res.on("end", () => {
           const body = Buffer.concat(chunks).toString("utf-8");
           resolve({ status: res.statusCode, headers: res.headers, body });
         });
       }
     );
+    req.on("error", reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
+
+function requestAbortedBody(port, path, options = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: "127.0.0.1", port, path, method: options.method ?? "GET",
+      headers: options.headers ?? {},
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("error", () => {});
+      res.on("aborted", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+      res.on("end", () => reject(new Error("stream ended normally")));
+    });
     req.on("error", reject);
     if (options.body) req.write(options.body);
     req.end();
@@ -425,6 +445,98 @@ test("Gateway server uploads usage records after a successful proxied request", 
     assert.equal(payload.records[0].model, "claude-sonnet-4-6");
     assert.equal(payload.records[0].input_tokens, 12);
     assert.equal(payload.records[0].output_tokens, 34);
+  } finally {
+    globalThis.fetch = savedFetch;
+    httpServer.close();
+  }
+});
+
+function interruptedStreamResponse() {
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'));
+      setTimeout(() => controller.error(new Error("reader-secret-must-not-cross")), 20);
+    },
+  }), { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+function interruptedAfterDoneResponse() {
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":5}}\n\n'));
+      controller.enqueue(Buffer.from('data: [DONE]\n\n'));
+      setTimeout(() => controller.error(new Error("late-reader-secret")), 20);
+    },
+  }), { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+function streamTestConfig(port) {
+  return {
+    host: "127.0.0.1", port, status_check: false,
+    endpoints: { openai: {
+      name: "openai", base_url: "https://example.com/v1", auth_style: "bearer",
+      keys: ["sk-test"], passthrough: false, fallbacks: [], model_fallbacks: {},
+    } },
+  };
+}
+
+async function freePort() {
+  return new Promise((resolve) => {
+    const server = http.createServer();
+    server.listen(0, () => {
+      const port = server.address().port;
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+test("Gateway aborts downstream HTTP when an upstream SSE reader fails", async () => {
+  const { GatewayServer } = await import(`../dist/gateway/index.js?stream-abort=${Date.now()}`);
+  const { UsageStorage, UsageTracker } = await import(`../dist/index.js?stream-abort=${Date.now()}`);
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => interruptedStreamResponse();
+  const port = await freePort();
+  const server = new GatewayServer(streamTestConfig(port));
+  server.usage = new UsageTracker(new UsageStorage(makeTempUsageTrackerConfig(), "/stream-abort"));
+  const httpServer = http.createServer((req, res) => server._handleRequest(req, res));
+  await new Promise((resolve) => httpServer.listen(port, "127.0.0.1", resolve));
+  try {
+    const body = await requestAbortedBody(port, "/openai/v1/chat/completions", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash", messages: [], stream: true }),
+    });
+    assert.match(body, /partial/);
+    assert.doesNotMatch(body, /reader-secret|stream_error|type":"error/);
+    assert.equal(server.usage.storage.read("all").length, 0);
+  } finally {
+    globalThis.fetch = savedFetch;
+    httpServer.close();
+  }
+});
+
+test("Gateway completes an accounted SSE that fails after its terminal event", async () => {
+  const marker = Date.now();
+  const { GatewayServer } = await import(`../dist/gateway/index.js?late-stream=${marker}`);
+  const { UsageStorage, UsageTracker } = await import(`../dist/index.js?late-stream=${marker}`);
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => interruptedAfterDoneResponse();
+  const port = await freePort();
+  const server = new GatewayServer(streamTestConfig(port));
+  server.usage = new UsageTracker(new UsageStorage(makeTempUsageTrackerConfig(), "/late-stream"));
+  const httpServer = http.createServer((req, res) => server._handleRequest(req, res));
+  await new Promise((resolve) => httpServer.listen(port, "127.0.0.1", resolve));
+  try {
+    const response = await request(port, "/openai/v1/chat/completions", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash", messages: [], stream: true }),
+    });
+    assert.match(response.body, /\[DONE\]/);
+    assert.doesNotMatch(response.body, /late-reader-secret|stream_error/);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const records = server.usage.storage.read("all");
+    assert.equal(records.length, 1);
+    assert.equal(records[0].in, 8);
+    assert.equal(records[0].out, 5);
   } finally {
     globalThis.fetch = savedFetch;
     httpServer.close();
