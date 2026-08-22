@@ -1,5 +1,5 @@
-// input:  built GatewayServer, stubbed fetch, ephemeral cache/storage
-// output: gateway endpoint, usage, and pricing-refresh regressions
+// input:  built GatewayServer, stubbed fetch, ephemeral stores
+// output: endpoint, quota, usage, stream, and pricing regressions
 // pos:    Gateway HTTP runtime integration regression tests
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
@@ -941,4 +941,121 @@ test("Gateway server reads usage once for a grouped report", async () => {
     await new Promise(resolve => httpServer.close(resolve));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+function subscriptionGatewayConfig() {
+  const anthropic = {
+    name: "anthropic", base_url: "https://api.anthropic.test", auth_style: "bearer",
+    keys: [], passthrough: true, fallbacks: [], model_fallbacks: {},
+  };
+  return {
+    host: "127.0.0.1", port: 0, status_check: false, mode: "plan",
+    endpoints: { anthropic }, endpoint_modes: { plan: { anthropic } },
+  };
+}
+
+async function withQuotaGateway(fetchImpl, run) {
+  const { GatewayServer, QuotaSnapshotStore } = await import("../dist/gateway/index.js");
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-quota-snapshot-"));
+  const server = new GatewayServer(subscriptionGatewayConfig());
+  server.quota = new QuotaSnapshotStore(path.join(tmpDir, "quota.json"));
+  const httpServer = http.createServer((req, res) => server._handleRequest(req, res));
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+  await new Promise(resolve => httpServer.listen(0, "127.0.0.1", resolve));
+  try {
+    await run(httpServer.address().port, server, tmpDir);
+  } finally {
+    globalThis.fetch = savedFetch;
+    await new Promise(resolve => httpServer.close(resolve));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+function quotaStream(headers) {
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"type":"message_stop"}\n\n'));
+      controller.close();
+    },
+  });
+  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream", ...headers } });
+}
+
+async function sendSubscriptionRequest(port) {
+  return request(port, "/m/plan/anthropic/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer secret-never-persist" },
+    body: JSON.stringify({ model: "claude-opus-5", messages: [], stream: true }),
+  });
+}
+
+test("Gateway snapshots and forwards Anthropic 5h/7d quota headers", async () => {
+  const quotaHeaders = {
+    "anthropic-ratelimit-unified-status": "allowed",
+    "anthropic-ratelimit-unified-5h-utilization": "0.34",
+    "anthropic-ratelimit-unified-5h-reset": "1787428800",
+    "anthropic-ratelimit-unified-7d-utilization": "0.61",
+    "anthropic-ratelimit-unified-7d-reset": "1787860800",
+  };
+  await withQuotaGateway(async () => quotaStream(quotaHeaders), async (port, _server, tmpDir) => {
+    const proxied = await sendSubscriptionRequest(port);
+    assert.equal(proxied.status, 200);
+    assert.equal(proxied.headers["anthropic-ratelimit-unified-5h-utilization"], "0.34");
+
+    const response = await request(port, "/quota?provider=anthropic");
+    assert.equal(response.status, 200);
+    const payload = JSON.parse(response.body);
+    assert.equal(payload.providers.length, 1);
+    assert.equal(payload.providers[0].provider, "anthropic");
+    assert.equal(payload.providers[0].mode, "plan");
+    assert.deepEqual(payload.providers[0].windows, [
+      { type: "five_hour", utilization: 0.34, resets_at: 1787428800 },
+      { type: "seven_day", utilization: 0.61, resets_at: 1787860800 },
+    ]);
+    assert.equal(typeof payload.providers[0].observed_at, "number");
+    assert.equal(fs.readFileSync(path.join(tmpDir, "quota.json"), "utf8").includes("secret-never-persist"), false);
+  });
+});
+
+test("Gateway snapshots a rejected representative claim before the 429 body path", async () => {
+  const headers = {
+    "content-type": "application/json",
+    "anthropic-ratelimit-unified-status": "rejected",
+    "anthropic-ratelimit-unified-representative-claim": "7d",
+    "anthropic-ratelimit-unified-reset": "1787860800",
+  };
+  await withQuotaGateway(async () => new Response('{"error":{"type":"rate_limit_error"}}', {
+    status: 429, headers,
+  }), async (port) => {
+    const proxied = await sendSubscriptionRequest(port);
+    assert.equal(proxied.status, 429);
+    const payload = JSON.parse((await request(port, "/quota?provider=anthropic")).body);
+    assert.deepEqual(payload.providers[0].windows, [
+      { type: "seven_day", utilization: 1, resets_at: 1787860800 },
+    ]);
+  });
+});
+
+test("Gateway quota cold/malformed reads are non-destructive and snapshots survive recreation", async () => {
+  let responseHeaders = {
+    "anthropic-ratelimit-unified-5h-utilization": "0.4",
+    "anthropic-ratelimit-unified-5h-reset": "1787428800",
+  };
+  await withQuotaGateway(async () => quotaStream(responseHeaders), async (port, server, tmpDir) => {
+    assert.deepEqual(JSON.parse((await request(port, "/quota?provider=missing")).body), { providers: [] });
+    await sendSubscriptionRequest(port);
+    responseHeaders = {
+      "anthropic-ratelimit-unified-5h-utilization": "not-a-number",
+      "anthropic-ratelimit-unified-5h-reset": "1787429900",
+    };
+    await sendSubscriptionRequest(port);
+
+    const first = JSON.parse((await request(port, "/quota?provider=anthropic")).body);
+    assert.equal(first.providers[0].windows[0].utilization, 0.4);
+    const { QuotaSnapshotStore } = await import("../dist/gateway/index.js");
+    server.quota = new QuotaSnapshotStore(path.join(tmpDir, "quota.json"));
+    const restarted = JSON.parse((await request(port, "/quota?provider=anthropic")).body);
+    assert.deepEqual(restarted, first);
+  });
 });

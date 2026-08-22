@@ -1,5 +1,5 @@
 // input:  CLI options, gateway config, filesystem watcher
-// output: Public gateway exports and startGateway()
+// output: Public gateway/quota exports and startGateway()
 // pos:    Gateway package entry point
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
@@ -22,6 +22,8 @@ export type { GatewayConfig, EndpointConfig, FallbackConfig } from "./config.js"
 export { checkGatewayAuth } from "./auth.js";
 export type { GatewayAuthConfig } from "./auth.js";
 export { HealthTracker, isServerError } from "./health.js";
+export { QuotaSnapshotStore } from "./quota-snapshot.js";
+export type { ProviderQuotaSnapshot, QuotaWindowSnapshot } from "./quota-snapshot.js";
 export {
   anthropicRequestToOpenai,
   openaiResponseToAnthropic,

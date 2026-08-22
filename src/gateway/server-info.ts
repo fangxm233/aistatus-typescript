@@ -1,5 +1,5 @@
-// input:  Gateway config, health state, usage storage, info requests
-// output: health/status/usage responses and global health prechecks
+// input:  Gateway config, health, usage/quota storage, info requests
+// output: health/status/usage/quota responses and health prechecks
 // pos:    Gateway operational endpoint handlers
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
@@ -8,6 +8,7 @@ import * as http from "node:http";
 import type { UsageTracker } from "../usage.js";
 import type { EndpointConfig, GatewayConfig } from "./config.js";
 import type { HealthTracker } from "./health.js";
+import type { QuotaSnapshotStore } from "./quota-snapshot.js";
 import { asInt, jsonResponse } from "./server-helpers.js";
 
 export function handleHealth(config: GatewayConfig, res: http.ServerResponse): void {
@@ -66,6 +67,15 @@ export function handleUsage(
     return;
   }
   handleUsageSummary(tracker, query, res);
+}
+
+export function handleQuota(
+  store: QuotaSnapshotStore,
+  query: Record<string, string>,
+  res: http.ServerResponse,
+): void {
+  const provider = typeof query.provider === "string" ? query.provider : undefined;
+  jsonResponse(res, 200, { providers: store.list(provider) });
 }
 
 function handleUsageRecords(

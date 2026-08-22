@@ -1,7 +1,7 @@
 一旦此文件夹有文件变化，请更新我
 
 TypeScript SDK 源码目录，包含主 SDK 导出、gateway 配置/服务与共享 usage 逻辑。
-`gateway/` 负责 HTTP proxy 与配置解析；`providers/` 提供各 LLM API 适配器；其余文件提供路由、状态与成本计算等基础能力。
+`gateway/` 负责 HTTP proxy、配置与 quota snapshot；`providers/` 提供各 LLM API 适配器；其余文件提供路由、状态与成本计算。
 
 | filename | role | function |
 |---|---|---|
@@ -21,4 +21,4 @@ TypeScript SDK 源码目录，包含主 SDK 导出、gateway 配置/服务与共
 | `config.ts` | SDK config layer | Persistent upload config helpers with configure/env/file/default precedence and YAML file I/O at `~/.aistatus/config.yaml` |
 | `uploader.ts` | upload bridge | Build usage upload payloads and POST them asynchronously with silent failure semantics |
 | `providers/` | adapter layer | ProviderAdapter base class + Anthropic, OpenAI, Google, OpenRouter, Compatible adapters |
-| `gateway/` | gateway module | Gateway config parsing, server runtime (with per-request mode routing), health tracking, and translation exports |
+| `gateway/` | gateway module | Gateway routing, health, quota snapshots, and translation exports |

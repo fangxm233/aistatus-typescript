@@ -1,6 +1,6 @@
 // input:  GatewayConfig, HTTP requests, provider responses
-// output: Proxy responses and persisted usage records
-// pos:    Gateway HTTP routing and accounting runtime
+// output: Proxy responses plus persisted usage and quota snapshots
+// pos:    Gateway HTTP routing, accounting and quota runtime
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
 import * as http from "node:http";
@@ -14,6 +14,7 @@ import { HealthTracker } from "./health.js";
 import { anthropicRequestToOpenai, openaiResponseToAnthropic } from "./translate.js";
 import { UsageTracker } from "../usage.js";
 import { CostCalculator } from "../pricing.js";
+import { QuotaSnapshotStore } from "./quota-snapshot.js";
 import { getConfig } from "../config.js";
 import { UsageUploader } from "../uploader.js";
 import {
@@ -34,6 +35,7 @@ import {
 import {
   applyGlobalModelHealthPrecheck,
   handleHealth,
+  handleQuota,
   handleStatus,
   handleUsage,
 } from "./server-info.js";
@@ -55,6 +57,7 @@ export class GatewayServer {
   config: GatewayConfig;
   health: HealthTracker;
   usage: UsageTracker;
+  quota: QuotaSnapshotStore;
   pricing: CostCalculator;
   private _keyIdx: Record<string, number> = {};
   private _pidFile: string | null;
@@ -75,6 +78,7 @@ export class GatewayServer {
     this.config = config;
     this.health = new HealthTracker();
     this.usage = new UsageTracker(undefined, new UsageUploader(getConfig()));
+    this.quota = new QuotaSnapshotStore();
     this.pricing = new CostCalculator();
     this._pidFile = pidFile ?? null;
     this._dumpDir = process.env.GATEWAY_DUMP_DIR || null;
@@ -179,6 +183,9 @@ export class GatewayServer {
     }
     if (pathname === "/usage" && req.method === "GET") {
       return handleUsage(this.usage, parsedUrl.query as Record<string, string>, res);
+    }
+    if (pathname === "/quota" && req.method === "GET") {
+      return handleQuota(this.quota, parsedUrl.query as Record<string, string>, res);
     }
     if (pathname === "/mode" && req.method === "POST") {
       return this._handleModeSwitch(req, res);
@@ -492,6 +499,7 @@ export class GatewayServer {
     }
 
     const elapsedMs = Date.now() - t0;
+    this._observeQuota(upstreamRes, backend, billingMode);
 
     // Check retryable status
     if ([429, 500, 502, 503, 529].includes(upstreamRes.status)) {
@@ -510,6 +518,16 @@ export class GatewayServer {
     } else {
       await this._respond(res, upstreamRes, backend, originalModel, elapsedMs, fallbackHeader, billingMode, body, metadata);
     }
+  }
+
+  private _observeQuota(upstream: Response, backend: Backend, billingMode?: string): void {
+    if (!backend.id.startsWith("anthropic:") || !backend.id.endsWith(":passthrough")) return;
+    if (backend.auth_style !== "bearer") return;
+    this.quota.observe(upstream.headers, {
+      provider: "anthropic",
+      mode: billingMode ?? this.config.mode,
+      status: upstream.status,
+    });
   }
 
   private async _respond(
