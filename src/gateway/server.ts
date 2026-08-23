@@ -140,6 +140,7 @@ export class GatewayServer {
       server.on("error", reject);
     });
 
+    this._prewarmUsage();
     this._writePidFile();
     this._printBanner();
 
@@ -157,6 +158,14 @@ export class GatewayServer {
 
     process.on("SIGTERM", shutdown);
     process.on("SIGINT", shutdown);
+  }
+
+  private _prewarmUsage(): void {
+    try {
+      this.usage.prewarm("month");
+    } catch (error) {
+      console.warn("[gateway] Usage index prewarm failed:", error);
+    }
   }
 
   // ------------------------------------------------------------------

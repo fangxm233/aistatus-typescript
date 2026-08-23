@@ -1,17 +1,13 @@
-/**
- * Usage tracking with JSONL persistence.
- * Records API usage per request and provides summary/grouping.
- */
-
-// input: per-request usage payloads from gateway/router code, optional upload bridge, and optional filesystem base dir
-// output: persisted JSONL usage records plus aggregate summaries/groupings for reporting APIs and optional uploader fan-out
-// pos: shared usage storage/tracking layer used by the gateway /usage endpoint and SDK usage reporting
-// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
+// input:  usage payloads, JSONL storage and upload bridge
+// output: persisted records and indexed aggregate reports
+// pos:    Shared usage persistence and reporting API
+// >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
+import { UsageAggregateIndex, periodSinceMs, type UsageGroupKey } from "./usage-index.js";
 
 interface UsageUploadRecord extends Record<string, unknown> {
   ts: string;
@@ -38,6 +34,7 @@ interface UsageUploadTarget {
 export class UsageStorage {
   private _baseDir: string;
   private _projectDir: string;
+  private _aggregateIndex: UsageAggregateIndex;
 
   constructor(baseDir?: string, cwd?: string) {
     this._baseDir = baseDir ?? path.join(os.homedir(), ".aistatus", "usage");
@@ -46,12 +43,21 @@ export class UsageStorage {
     this._projectDir = path.join(this._baseDir, "projects", hash);
     fs.mkdirSync(this._projectDir, { recursive: true });
     this._ensureManifest(cwdPath);
+    this._aggregateIndex = new UsageAggregateIndex(this._projectDir);
   }
 
   append(record: Record<string, unknown>): void {
     const monthKey = this._monthKey(record.ts as string | undefined);
     const filePath = path.join(this._projectDir, `${monthKey}.jsonl`);
     fs.appendFileSync(filePath, JSON.stringify(record) + "\n", "utf-8");
+  }
+
+  aggregate(period = "month", groupBy?: UsageGroupKey): Record<string, unknown> {
+    return this._aggregateIndex.report(period, groupBy);
+  }
+
+  prewarm(period = "month"): void {
+    this._aggregateIndex.prewarm(period);
   }
 
   read(period = "month", allProjects = false): Array<Record<string, unknown>> {
@@ -132,20 +138,8 @@ function parseTs(value?: string): Date | null {
 }
 
 function periodSince(period: string): Date | null {
-  const now = new Date();
-  if (period === "today") {
-    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  }
-  if (period === "week") {
-    return new Date(now.getTime() - 7 * 86400_000);
-  }
-  if (period === "month") {
-    return new Date(now.getTime() - 30 * 86400_000);
-  }
-  if (period === "all") {
-    return null;
-  }
-  throw new Error(`Unsupported period: ${period}`);
+  const sinceMs = periodSinceMs(period);
+  return sinceMs === null ? null : new Date(sinceMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +196,12 @@ export class UsageTracker {
     return record;
   }
 
+  prewarm(period = "month"): void {
+    this.storage.prewarm?.(period);
+  }
+
   report(period = "month", groupBy?: UsageGroupKey): Record<string, unknown> {
+    if (typeof this.storage.aggregate === "function") return this.storage.aggregate(period, groupBy);
     const records = this.storage.read(period);
     const result: Record<string, unknown> = { summary: summarizeUsage(records, period) };
     if (groupBy) result[`${groupBy}s`] = groupUsage(records, groupBy);
@@ -210,19 +209,17 @@ export class UsageTracker {
   }
 
   summary(period = "month"): Record<string, unknown> {
-    return summarizeUsage(this.storage.read(period), period);
+    return this.report(period).summary as Record<string, unknown>;
   }
 
   byModel(period = "month"): Array<Record<string, unknown>> {
-    return groupUsage(this.storage.read(period), "model");
+    return this.report(period, "model").models as Array<Record<string, unknown>>;
   }
 
   byProvider(period = "month"): Array<Record<string, unknown>> {
-    return groupUsage(this.storage.read(period), "provider");
+    return this.report(period, "provider").providers as Array<Record<string, unknown>>;
   }
 }
-
-type UsageGroupKey = "model" | "provider";
 
 interface UsageBucket {
   requests: number;

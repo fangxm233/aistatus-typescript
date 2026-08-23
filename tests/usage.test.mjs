@@ -1,13 +1,13 @@
+// input:  built usage classes and temporary JSONL storage
+// output: persistence, incremental index and aggregation regressions
+// pos:    Usage storage and reporting boundary tests
+// >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
-// input: built UsageTracker and UsageStorage classes from dist with temporary on-disk JSONL storage
-// output: regression tests for usage persistence, aggregation, and optional billing_mode recording
-// pos: usage storage tests protecting gateway usage record schema and readback behavior
-// >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
 
 // We import from the gateway build which re-exports, or directly from dist
 // UsageTracker and UsageStorage are in src/usage.ts, built into dist/
@@ -207,6 +207,95 @@ test("UsageStorage persists records to JSONL files", async () => {
     assert.equal(records.length, 1);
     assert.equal(records[0].provider, "test");
     assert.equal(records[0].model, "test-model");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+function storedUsage(ts, overrides = {}) {
+  return {
+    ts, provider: "anthropic", model: "claude-test", in: 10, out: 5,
+    cost: 0.25, fallback: false, latency_ms: 100, ...overrides,
+  };
+}
+
+function usageProjectDir(baseDir) {
+  const projectsDir = path.join(baseDir, "projects");
+  return path.join(projectsDir, fs.readdirSync(projectsDir)[0]);
+}
+
+function onlyUsageFile(baseDir) {
+  const dir = usageProjectDir(baseDir);
+  return fs.readdirSync(dir).filter((name) => name.endsWith(".jsonl"))
+    .map((name) => path.join(dir, name)).sort().at(-1);
+}
+
+test("UsageTracker prewarms rolling reports and ingests appended tails", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-index-tail-test-"));
+  try {
+    const { UsageStorage, UsageTracker } = await import("../dist/index.js");
+    const storage = new UsageStorage(tmpDir, "/test/index-tail");
+    const tracker = new UsageTracker(storage);
+    const now = Date.now();
+    storage.append(storedUsage(new Date(now - 29 * 86400_000).toISOString()));
+    storage.append(storedUsage(new Date(now - 31 * 86400_000).toISOString(), { cost: 9 }));
+
+    tracker.prewarm("month");
+    assert.equal(tracker.report("month", "provider").summary.requests, 1);
+
+    storage.append(storedUsage(new Date().toISOString(), { provider: "deepseek" }));
+    assert.equal(tracker.report("month").summary.requests, 2);
+    storage.append(storedUsage(new Date().toISOString(), { provider: "Qwen" }));
+    const file = onlyUsageFile(tmpDir);
+    fs.appendFileSync(file, JSON.stringify(storedUsage(new Date().toISOString(), { provider: "openai" })) + "\n");
+    const report = tracker.report("month", "provider");
+    assert.equal(report.summary.requests, 4);
+    assert.deepEqual(report.providers.map((row) => row.provider).sort(), ["Qwen", "anthropic", "deepseek", "openai"]);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("UsageTracker includes recently modified legacy month files", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-index-legacy-test-"));
+  try {
+    const { UsageStorage, UsageTracker } = await import("../dist/index.js");
+    const storage = new UsageStorage(tmpDir, "/test/index-legacy");
+    const tracker = new UsageTracker(storage);
+    const legacy = path.join(usageProjectDir(tmpDir), "2000-01.jsonl");
+    fs.writeFileSync(legacy, JSON.stringify(storedUsage(new Date().toISOString())) + "\n");
+
+    assert.equal(tracker.report("today").summary.requests, 1);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("UsageTracker waits for complete tail lines and rebuilds replaced files", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-index-rebuild-test-"));
+  try {
+    const { UsageStorage, UsageTracker } = await import("../dist/index.js");
+    const storage = new UsageStorage(tmpDir, "/test/index-rebuild");
+    const tracker = new UsageTracker(storage);
+    storage.append(storedUsage(new Date().toISOString()));
+    tracker.prewarm("today");
+    const file = onlyUsageFile(tmpDir);
+    const partial = JSON.stringify(storedUsage(new Date().toISOString(), { provider: "deepseek" }));
+    fs.appendFileSync(file, partial.slice(0, -2));
+    assert.equal(tracker.summary("today").requests, 1);
+    fs.appendFileSync(file, partial.slice(-2) + "\n");
+    assert.equal(tracker.summary("today").requests, 2);
+
+    fs.writeFileSync(file, JSON.stringify(storedUsage(new Date().toISOString(), { provider: "Qwen", cost: 1 })) + "\n");
+    const report = tracker.report("today", "provider");
+    assert.equal(report.summary.requests, 1);
+    assert.equal(report.providers[0].provider, "Qwen");
+
+    const sameSize = fs.readFileSync(file, "utf8").replace("Qwen", "Zwen");
+    fs.writeFileSync(file, sameSize);
+    const future = new Date(Date.now() + 2_000);
+    fs.utimesSync(file, future, future);
+    assert.equal(tracker.report("today", "provider").providers[0].provider, "Zwen");
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

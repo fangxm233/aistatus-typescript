@@ -903,7 +903,7 @@ test("Gateway server /usage validates query params", async () => {
   }
 });
 
-test("Gateway server reads usage once for a grouped report", async () => {
+test("Gateway server uses one indexed aggregate for a grouped report", async () => {
   const { GatewayServer } = await import("../dist/gateway/index.js");
   const { UsageTracker, UsageStorage } = await import("../dist/index.js");
   const config = {
@@ -917,9 +917,9 @@ test("Gateway server reads usage once for a grouped report", async () => {
     ts: new Date().toISOString(), provider: "deepseek", model: "deepseek-v4",
     in: 3, out: 2, cost: 0.5, latency_ms: 100, fallback: false,
   });
-  const originalRead = storage.read.bind(storage);
-  let reads = 0;
-  storage.read = (...args) => { reads++; return originalRead(...args); };
+  const originalAggregate = storage.aggregate.bind(storage);
+  let aggregates = 0;
+  storage.aggregate = (...args) => { aggregates++; return originalAggregate(...args); };
   server.usage = new UsageTracker(storage);
   const httpServer = http.createServer((req, res) => {
     server._handleRequest(req, res).catch(() => {
@@ -934,7 +934,7 @@ test("Gateway server reads usage once for a grouped report", async () => {
     const response = await request(port, "/usage?period=today&group_by=provider");
     assert.equal(response.status, 200);
     const body = JSON.parse(response.body);
-    assert.equal(reads, 1);
+    assert.equal(aggregates, 1);
     assert.equal(body.summary.requests, 1);
     assert.equal(body.providers[0].provider, "deepseek");
   } finally {

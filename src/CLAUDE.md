@@ -16,7 +16,8 @@ TypeScript SDK 源码目录，包含主 SDK 导出、gateway 配置/服务与共
 | `errors.ts` | error classes | AllProvidersDown, ProviderCallFailed, and other typed errors |
 | `http.ts` | HTTP utilities | fetchJson, readEnv, extractText, joinUrl helpers |
 | `defaults.ts` | provider defaults | AUTO_PROVIDERS, MODEL_PREFIX_MAP, PROVIDER_ALIASES for auto-discovery and routing |
-| `usage.ts` | shared library | Persist per-request usage records (with cache tokens), compute aggregate summaries/groupings, and optionally forward records to the uploader |
+| `usage.ts` | shared library | Persist usage records and expose indexed reports |
+| `usage-index.ts` | aggregation | Incrementally index JSONL files for usage summaries |
 | `pricing.ts` | cost calculator | Calculate costs from cached pricing or an awaited deduplicated refresh |
 | `config.ts` | SDK config layer | Persistent upload config helpers with configure/env/file/default precedence and YAML file I/O at `~/.aistatus/config.yaml` |
 | `uploader.ts` | upload bridge | Build usage upload payloads and POST them asynchronously with silent failure semantics |
