@@ -28,6 +28,7 @@ export const RESERVED_KEYS = new Set([
   "auth",
   "status_check",
   "max_body_size_mb",
+  "websocket",
   "endpoint_modes",
   "endpoints",
 ]);
@@ -111,6 +112,9 @@ export interface GatewayConfig {
   port: number;
   status_check: boolean;
   max_body_size_mb?: number;
+  /** Proxy WebSocket upgrades (default true). Set false to refuse them; clients that support both
+   *  transports — such as PI's Codex backend — then fall back to plain SSE over HTTP. */
+  websocket: boolean;
   mode: string;
   auth?: GatewayAuthConfig;
   endpoints: Record<string, EndpointConfig>;
@@ -209,6 +213,7 @@ export function fromDict(raw: Record<string, unknown>): GatewayConfig {
   const host = (raw.host as string) ?? "127.0.0.1";
   const port = (raw.port as number) ?? 9880;
   const status_check = raw.status_check !== false;
+  const websocket = raw.websocket !== false;
   const max_body_size_mb = parseMaxBodySizeMb(raw.max_body_size_mb);
 
   const endpoint_modes: Record<string, Record<string, EndpointConfig>> = {};
@@ -254,6 +259,7 @@ export function fromDict(raw: Record<string, unknown>): GatewayConfig {
     host,
     port,
     status_check,
+    websocket,
     max_body_size_mb,
     mode: activeMode,
     auth,
@@ -304,6 +310,7 @@ export function autoDiscover(host = "127.0.0.1", port = 9880): GatewayConfig {
     host,
     port,
     status_check: true,
+    websocket: true,
     max_body_size_mb: DEFAULT_MAX_BODY_SIZE_MB,
     mode: "default",
     endpoints,

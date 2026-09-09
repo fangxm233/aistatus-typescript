@@ -33,6 +33,46 @@ export function parseUrlMetadata(raw: string): Record<string, string> {
   return result;
 }
 
+/** Where a proxy path resolves to, or why it does not. Shared by the HTTP and upgrade entry points
+ *  so a WebSocket lands on the same endpoint, mode and metadata as the equivalent HTTP request. */
+export type ProxyRoute =
+  | { kind: "route"; epName: string; pathStr: string; mode?: string; metadata?: Record<string, string> }
+  | { kind: "unknown-mode"; mode: string }
+  | { kind: "not-found" };
+
+/**
+ * Resolve `/m/{mode}/{metadata}/{endpoint}/{path}`, `/m/{mode}/{endpoint}/{path}` or
+ * `/{endpoint}/{path}`. The 4-segment form is tried first and, when its third segment is not a known
+ * endpoint of that mode, deliberately falls through to the 3-segment form — a path may legitimately
+ * carry no metadata. An unknown mode is an error in either form rather than a fall-through, so a
+ * typo'd mode surfaces instead of being silently reinterpreted as an endpoint name.
+ */
+export function resolveProxyRoute(
+  pathname: string,
+  endpointModes: Record<string, Record<string, EndpointConfig>>,
+): ProxyRoute {
+  const mode4Match = pathname.match(/^\/m\/([^/]+)\/([^/]+)\/([^/]+)\/(.*)$/);
+  if (mode4Match) {
+    const [, mode, metaOrEp, epCandidate, pathStr] = mode4Match;
+    if (!endpointModes[mode]) return { kind: "unknown-mode", mode };
+    if (endpointModes[mode][epCandidate]) {
+      return { kind: "route", epName: epCandidate, pathStr, mode, metadata: parseUrlMetadata(metaOrEp) };
+    }
+  }
+
+  const modeMatch = pathname.match(/^\/m\/([^/]+)\/([^/]+)\/(.*)$/);
+  if (modeMatch) {
+    const [, mode, epName, pathStr] = modeMatch;
+    if (!endpointModes[mode]) return { kind: "unknown-mode", mode };
+    return { kind: "route", epName, pathStr, mode };
+  }
+
+  const match = pathname.match(/^\/([^/]+)\/(.*)$/);
+  if (!match) return { kind: "not-found" };
+  const [, epName, pathStr] = match;
+  return { kind: "route", epName, pathStr };
+}
+
 export function jsonResponse(res: http.ServerResponse, status: number, data: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(data));

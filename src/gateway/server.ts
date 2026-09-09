@@ -26,11 +26,11 @@ import {
   hasThinkingEnabled,
   jsonResponse,
   mapModel,
-  parseUrlMetadata,
   parseUsageResponse,
   primaryBackend,
   readBody,
   replaceModel,
+  resolveProxyRoute,
 } from "./server-helpers.js";
 import {
   applyGlobalModelHealthPrecheck,
@@ -200,46 +200,23 @@ export class GatewayServer {
       return this._handleModeSwitch(req, res);
     }
 
-    // Per-request mode with optional metadata: /m/{mode}/{metadata?}/{epName}/{pathStr}
-    // Try 4-segment first (with metadata), fall back to 3-segment (without)
-    const mode4Match = pathname.match(/^\/m\/([^/]+)\/([^/]+)\/([^/]+)\/(.*)$/);
-    if (mode4Match) {
-      const [, requestMode, metaOrEp, epCandidate, pathStr] = mode4Match;
-      if (!this.config.endpoint_modes[requestMode]) {
-        return jsonResponse(res, 400, {
-          error: { message: `Unknown mode: ${requestMode}`, type: "gateway_error" },
-        });
-      }
-      const modeEndpoints = this.config.endpoint_modes[requestMode];
-      if (modeEndpoints[epCandidate]) {
-        const metadata = parseUrlMetadata(metaOrEp);
-        await this._handleProxy(req, res, epCandidate, pathStr, parsedUrl.query as Record<string, string>, requestMode, metadata);
-        return;
-      }
+    // Proxy: /m/{mode}/{metadata?}/{endpoint}/{path...} or /{endpoint}/{path...}
+    const route = resolveProxyRoute(pathname, this.config.endpoint_modes);
+    if (route.kind === "unknown-mode") {
+      return jsonResponse(res, 400, {
+        error: { message: `Unknown mode: ${route.mode}`, type: "gateway_error" },
+      });
     }
-
-    const modeMatch = pathname.match(/^\/m\/([^/]+)\/([^/]+)\/(.*)$/);
-    if (modeMatch) {
-      const [, requestMode, epName, pathStr] = modeMatch;
-      if (!this.config.endpoint_modes[requestMode]) {
-        return jsonResponse(res, 400, {
-          error: { message: `Unknown mode: ${requestMode}`, type: "gateway_error" },
-        });
-      }
-      await this._handleProxy(req, res, epName, pathStr, parsedUrl.query as Record<string, string>, requestMode);
-      return;
-    }
-
-    // Proxy: /{endpoint}/{path...}
-    const match = pathname.match(/^\/([^/]+)\/(.*)$/);
-    if (!match) {
+    if (route.kind === "not-found") {
       return jsonResponse(res, 404, {
         error: { message: `Not found: ${pathname}`, type: "gateway_error" },
       });
     }
 
-    const [, epName, pathStr] = match;
-    await this._handleProxy(req, res, epName, pathStr, parsedUrl.query as Record<string, string>);
+    await this._handleProxy(
+      req, res, route.epName, route.pathStr,
+      parsedUrl.query as Record<string, string>, route.mode, route.metadata,
+    );
   }
 
   // ------------------------------------------------------------------
