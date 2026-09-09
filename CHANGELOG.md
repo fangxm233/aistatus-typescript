@@ -1,6 +1,28 @@
 # Changelog
 
-## 0.0.8 — 2026-07-31
+## 0.0.8 — 2026-09-08
+
+### Gateway — OpenAI Responses API / ChatGPT Codex
+
+- **Responses API usage is now recorded** — the stream usage parser only understood Anthropic Messages SSE and OpenAI chat-completions SSE, where usage sits at the top level of an event. The Responses API (`/v1/responses`, ChatGPT Codex backend) nests it under the terminal event's `response` object, so no Codex request was ever recorded or uploaded. `response.completed` / `.incomplete` / `.done` are now understood.
+- **Cached input tokens are no longer double-counted** — the Responses API reports an `input_tokens` TOTAL that already includes the cached prefix, with the breakdown in `input_tokens_details`. Those are now split back out into the cache-read and cache-write fields. Anthropic and chat-completions payloads carry no `input_tokens_details` and are untouched.
+- **Event streams are detected by body, not by content type** — the ChatGPT Codex backend answers a streaming request with `content-type: application/json` and then writes SSE anyway. The gateway believed the header, so every Codex response was buffered whole and handed to the JSON usage parser, which failed on the SSE text. A response that does not announce itself as SSE now has its first chunk sniffed; SSE markers put it on the streaming path. Codex responses are also actually streamed to the client now, instead of arriving in one block at the end.
+- **Model names survive a compressed request body** — clients may zstd-compress the Codex request body, which `extractModel()` cannot read. The model is now taken from `response.model` rather than recording the request as `<provider>/unknown`.
+
+### Gateway — WebSocket
+
+- **WebSocket upgrades are proxied and accounted** — backends that stream over WebSocket rather than SSE (the ChatGPT Codex backend does) previously had no upgrade handler at all, so those connections were refused and any traffic on them would have been invisible to accounting. The gateway now replays the handshake upstream with rewritten auth headers and tunnels raw bytes in both directions, reading usage off a passive tap. One connection carries many responses, so a usage row is recorded per terminal event. `sec-websocket-extensions` is stripped from the handshake so permessage-deflate is never negotiated. No new runtime dependency.
+- **New `websocket` config key** (default `true`) — set to `false` to refuse upgrades; clients that speak both transports fall back to SSE.
+
+### Gateway — Reliability
+
+- **Interrupted SSE transport is preserved** — when an upstream stream reader fails mid-response, the downstream response is aborted rather than completed with a synthetic error event, so clients see a broken stream instead of a plausible-looking truncated one.
+- **Anthropic quota response headers are captured** — rate-limit windows observed on passthrough responses are persisted and served from `/quota`.
+- **Configurable request body limit** — `max_body_size_mb` (default `100`) replaces the previously hardcoded cap, and config hot-reload applies a changed limit to subsequent requests.
+
+### Usage
+
+- **Indexed, incremental usage reports** — report aggregation no longer rescans the whole history on every call, and grouped aggregation was reworked to a single pass.
 
 ### Fixes
 
