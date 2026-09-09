@@ -59,13 +59,14 @@
   "scripts": {
     "build": "tsup src/index.ts src/gateway/index.ts src/gateway-cli.ts --format esm,cjs --dts --clean",
     "check": "tsc --noEmit",
-    "test": "npm run build && node --test tests/status-api.test.mjs tests/router.test.mjs tests/router-advanced.test.mjs tests/health.test.mjs tests/config.test.mjs tests/uploader.test.mjs tests/translate.test.mjs tests/usage.test.mjs tests/pricing.test.mjs tests/server.test.mjs tests/body-limit.test.mjs tests/gateway-mode.test.mjs tests/gateway-reload.test.mjs tests/multimodal-structured-stream.test.mjs tests/codex-responses-usage.test.mjs",
+    "test": "npm run build && node --test tests/status-api.test.mjs tests/router.test.mjs tests/router-advanced.test.mjs tests/health.test.mjs tests/config.test.mjs tests/uploader.test.mjs tests/translate.test.mjs tests/usage.test.mjs tests/pricing.test.mjs tests/server.test.mjs tests/body-limit.test.mjs tests/gateway-mode.test.mjs tests/gateway-reload.test.mjs tests/multimodal-structured-stream.test.mjs tests/codex-responses-usage.test.mjs tests/websocket-proxy.test.mjs",
     "prepublishOnly": "npm run check && npm run test"
   },
   "devDependencies": {
     "@types/node": "^24.6.1",
     "tsup": "^8.5.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "ws": "^8.21.3"
   },
   "dependencies": {
     "yaml": "^2.8.3"

@@ -343,6 +343,10 @@ export function generateConfig(): string {
 port: 9880
 max_body_size_mb: 100
 
+# Proxy WebSocket upgrades as well as HTTP (default true). Clients that speak both — such as
+# PI's Codex backend — fall back to SSE over HTTP when this is off.
+# websocket: true
+
 # ── Authentication ─────────────────────────────────────────────
 # auth:
 #   keys:

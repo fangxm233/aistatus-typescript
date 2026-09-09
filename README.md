@@ -383,6 +383,12 @@ Environment variable references (`$VAR_NAME`) are resolved at load time.
 `max_body_size_mb` limits each buffered request body in MiB and defaults to
 `100`. Config-file hot reload applies a changed limit to subsequent requests.
 
+`websocket` (default `true`) controls whether the gateway also proxies
+WebSocket upgrades. Some backends stream over WebSocket rather than SSE — the
+ChatGPT Codex backend does, and PI prefers it — and the gateway tunnels those
+connections while still recording their token usage. Set it to `false` to
+refuse upgrades; clients that speak both transports fall back to SSE.
+
 ### How the Gateway Routes Requests
 
 When a request arrives at `/{endpoint}/{path}`:

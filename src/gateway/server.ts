@@ -4,6 +4,7 @@
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
 import * as http from "node:http";
+import * as stream from "node:stream";
 import * as url from "node:url";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -40,6 +41,7 @@ import {
   handleUsage,
 } from "./server-info.js";
 import { streamGatewayResponse } from "./stream-response.js";
+import { proxyWebSocket, refuseUpgrade } from "./websocket-proxy.js";
 import type { Backend } from "./server-types.js";
 import { recordGatewayUsage } from "./usage-accounting.js";
 
@@ -133,6 +135,13 @@ export class GatewayServer {
       });
     });
 
+    server.on("upgrade", (req, socket, head) => {
+      this._handleUpgrade(req, socket, head).catch(err => {
+        console.error("[gateway] Unhandled upgrade error:", err);
+        socket.destroy();
+      });
+    });
+
     this._server = server;
 
     await new Promise<void>((resolve, reject) => {
@@ -220,8 +229,83 @@ export class GatewayServer {
   }
 
   // ------------------------------------------------------------------
+  // WebSocket upgrade dispatcher
+  // ------------------------------------------------------------------
+
+  /**
+   * Route a WebSocket upgrade through the same endpoint/mode/metadata resolution as an HTTP request.
+   *
+   * Every rejection path answers with a plain HTTP error rather than hanging the socket: clients
+   * that speak both transports — PI's Codex backend tries WebSocket first — then fall back to SSE,
+   * so a gateway that cannot serve the upgrade degrades instead of breaking the session.
+   */
+  async _handleUpgrade(req: http.IncomingMessage, socket: stream.Duplex, head: Buffer): Promise<void> {
+    const parsedUrl = url.parse(req.url ?? "/", true);
+    const pathname = parsedUrl.pathname ?? "/";
+
+    if (!this.config.websocket) {
+      return refuseUpgrade(socket, 501, "WebSocket proxying is disabled");
+    }
+    if (!checkGatewayAuth(this.config.auth, pathname, req.headers as Record<string, string | string[] | undefined>)) {
+      return refuseUpgrade(socket, 401, "Unauthorized: invalid or missing API key");
+    }
+
+    const route = resolveProxyRoute(pathname, this.config.endpoint_modes);
+    if (route.kind === "unknown-mode") return refuseUpgrade(socket, 400, `Unknown mode: ${route.mode}`);
+    if (route.kind === "not-found") return refuseUpgrade(socket, 404, `Not found: ${pathname}`);
+
+    const resolved = this._resolveEndpoint(route.epName, route.mode);
+    if (!resolved) return refuseUpgrade(socket, 404, `Unknown endpoint: ${route.epName}`);
+
+    const backends = this._buildBackendList(resolved.endpoint, req);
+    const backend = backends[0] ?? this._pickSoonestCooldownBackend(resolved.endpoint, req);
+    if (!backend) return refuseUpgrade(socket, 503, "All backends unavailable");
+
+    const query = new url.URLSearchParams(parsedUrl.query as Record<string, string>).toString();
+    await proxyWebSocket({
+      req, socket, head, backend,
+      pathStr: route.pathStr,
+      search: query ? `?${query}` : "",
+      billingMode: resolved.billingMode,
+      defaultBillingMode: this.config.mode,
+      metadata: route.metadata,
+      health: this.health,
+      pricing: this.pricing,
+      tracker: this.usage,
+    });
+  }
+
+  // ------------------------------------------------------------------
   // Proxy handler
   // ------------------------------------------------------------------
+
+  /**
+   * Pick the endpoint an incoming request names, and the billing mode it should be recorded under.
+   *
+   * Without an explicit `/m/{mode}/` override, an endpoint missing from the active mode is looked up
+   * in the other modes: `gateway.yaml` groups endpoints by mode, and a caller hitting `/deepseek`
+   * while the gateway sits in `plan` mode still means the deepseek endpoint. The mode it was found
+   * in becomes the billing mode, so the record says which set of keys actually served it.
+   */
+  private _resolveEndpoint(
+    epName: string,
+    modeOverride?: string,
+  ): { endpoint: EndpointConfig; billingMode: string } | null {
+    const endpoints = modeOverride
+      ? this.config.endpoint_modes[modeOverride] ?? this.config.endpoints
+      : this.config.endpoints;
+
+    const endpoint = endpoints[epName];
+    if (endpoint) return { endpoint, billingMode: modeOverride || this.config.mode };
+    if (modeOverride) return null;
+
+    for (const [modeName, modeEndpoints] of Object.entries(this.config.endpoint_modes)) {
+      if (modeName === this.config.mode) continue;
+      const found = modeEndpoints[epName];
+      if (found) return { endpoint: found, billingMode: modeName };
+    }
+    return null;
+  }
 
   private async _handleProxy(
     req: http.IncomingMessage,
@@ -232,32 +316,13 @@ export class GatewayServer {
     modeOverride?: string,
     metadata?: Record<string, string>,
   ): Promise<void> {
-    // Use per-request mode endpoints if specified, otherwise global config
-    let endpoints = modeOverride
-      ? this.config.endpoint_modes[modeOverride] ?? this.config.endpoints
-      : this.config.endpoints;
-    let billingMode = modeOverride || this.config.mode;
-
-    let endpoint = endpoints[epName];
-    if (!endpoint && !modeOverride) {
-      // Auto-discover: search all other modes for the requested endpoint
-      for (const [modeName, modeEndpoints] of Object.entries(this.config.endpoint_modes)) {
-        if (modeName === this.config.mode) continue;
-        const found = modeEndpoints[epName];
-        if (found) {
-          endpoints = modeEndpoints;
-          billingMode = modeName;
-          endpoint = found;
-          break;
-        }
-      }
-    }
-
-    if (!endpoint) {
+    const resolved = this._resolveEndpoint(epName, modeOverride);
+    if (!resolved) {
       return jsonResponse(res, 404, {
         error: { message: `Unknown endpoint: ${epName}`, type: "gateway_error" },
       });
     }
+    const { endpoint, billingMode } = resolved;
 
     const body = await readBody(req, this.config.max_body_size_mb);
     const originalModel = extractModel(body);

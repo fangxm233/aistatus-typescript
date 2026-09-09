@@ -20,5 +20,6 @@ SDK 回归测试目录，覆盖 config、gateway server、usage、router、healt
 | `middleware.test.mjs` | regression test | Verify middleware hooks (beforeRequest, afterResponse, onError), execution order, dynamic use(), abort, tier routing, and fallback integration |
 | `gateway-auth.test.mjs` | regression test | Verify gateway API key authentication: Bearer/custom header, public paths, env var resolution, backward compatibility |
 | `multimodal-structured-stream.test.mjs` | regression test | Verify multimodal ContentBlock[] messages, ResponseFormat options, StreamChunk error type, routeStreamCallbacks, streamToReadable, and AbortSignal cancellation |
+| `websocket-proxy.test.mjs` | integration test | Verify WebSocket upgrade tunnelling, auth rewrite, per-response usage accounting on a pooled connection, large/binary frame reassembly, and the refusal paths |
 | `codex-responses-usage.test.mjs` | regression test | Verify OpenAI Responses API (Codex) stream accounting: nested `response.usage`, cached-input split-out, and model recovery from the stream |
 | `gateway-reload.test.mjs` | regression test | Verify `GatewayServer.reloadConfig()` in-place hot reload (host/port pinning, active-mode fallback) and `watchConfigFile()` mtime-polling change detection |
