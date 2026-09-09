@@ -8,28 +8,45 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+  id-token: write # required for npm trusted publishing (OIDC)
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Must match the "Environment name" of the trusted publisher on npmjs.com.
     environment: typescript
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
+      # NOTE: `registry-url` is deliberately omitted. It makes setup-node write
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into .npmrc. Under
+      # trusted publishing there is no token, so the line resolves to empty, the
+      # npm CLI treats auth as "already configured", skips the OIDC exchange and
+      # publishes anonymously -> E404 on PUT. See npm/documentation#1960.
+      # registry.npmjs.org is npm's built-in default, so nothing is lost.
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-          cache: npm
+          node-version: 24 # ships npm 11.x; OIDC needs npm >= 11.5.1
+          package-manager-cache: false # never restore a dep cache in a release build
+
+      - name: Verify OIDC preconditions
+        run: |
+          echo "node $(node --version) / npm $(npm --version)"
+          echo "registry: $(npm config get registry)"
+          npmrc="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          if [ -f "$npmrc" ] && grep -q "_authToken" "$npmrc"; then
+            echo "::error::_authToken found in $npmrc - npm will skip the OIDC exchange"
+            exit 1
+          fi
+          echo "no _authToken configured -> OIDC trusted publishing will be used"
 
       - name: Install dependencies
         run: npm ci
 
+      # No NODE_AUTH_TOKEN, no --provenance: credentials come from OIDC and
+      # provenance is generated automatically for trusted publishers.
       - name: Publish package
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish
