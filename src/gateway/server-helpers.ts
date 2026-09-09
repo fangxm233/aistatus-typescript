@@ -143,12 +143,47 @@ export function parseUsageResponse(responseBody: Buffer, originalModel: string):
 }
 
 function parseUsageFields(model: string, usage: Record<string, unknown>): GatewayUsage {
+  const responses = parseResponsesUsage(model, usage);
+  if (responses) return responses;
   return {
     model,
     inputTokens: asInt(usage.input_tokens ?? usage.prompt_tokens ?? 0),
     outputTokens: asInt(usage.output_tokens ?? usage.completion_tokens ?? 0),
     cacheCreationInputTokens: asInt(usage.cache_creation_input_tokens ?? 0),
     cacheReadInputTokens: asInt(usage.cache_read_input_tokens ?? 0),
+  };
+}
+
+/**
+ * Normalize an OpenAI Responses API usage block (`/v1/responses`, ChatGPT Codex backend).
+ *
+ * Unlike Anthropic — where `input_tokens` counts only the uncached prefix — the Responses API
+ * reports a TOTAL `input_tokens` that already includes cached and cache-write tokens, with the
+ * breakdown in `input_tokens_details`. Recording it verbatim would double-count the cached prefix,
+ * so the cached parts are subtracted out into their own fields (this mirrors what PI itself does in
+ * `@earendil-works/pi-ai/dist/api/openai-responses-shared.js`).
+ *
+ * Returns null for any other usage shape: the presence of `input_tokens_details` is the
+ * discriminator, and Anthropic / chat-completions payloads never carry it, so their existing
+ * handling is untouched.
+ */
+export function parseResponsesUsage(
+  model: string,
+  usage: Record<string, unknown>,
+): GatewayUsage | null {
+  const details = usage.input_tokens_details;
+  if (!details || typeof details !== "object" || Array.isArray(details)) return null;
+
+  const detail = details as Record<string, unknown>;
+  const cacheReadInputTokens = asInt(detail.cached_tokens ?? 0);
+  const cacheCreationInputTokens = asInt(detail.cache_write_tokens ?? 0);
+  const totalInputTokens = asInt(usage.input_tokens ?? 0);
+  return {
+    model,
+    inputTokens: Math.max(0, totalInputTokens - cacheReadInputTokens - cacheCreationInputTokens),
+    outputTokens: asInt(usage.output_tokens ?? 0),
+    cacheCreationInputTokens,
+    cacheReadInputTokens,
   };
 }
 

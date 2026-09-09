@@ -1,5 +1,5 @@
 // input:  upstream SSE response, Gateway accounting dependencies
-// output: forwarded/aborted SSE and complete-stream usage records
+// output: forwarded/aborted SSE, the reusable stream usage parser, and complete-stream usage records
 // pos:    Gateway streaming response and usage pipeline
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
@@ -8,9 +8,27 @@ import * as http from "node:http";
 import type { CostCalculator } from "../pricing.js";
 import type { UsageTracker } from "../usage.js";
 import { openaiSseToAnthropicSse } from "./translate.js";
-import { asInt, forwardUpstreamHeaders } from "./server-helpers.js";
+import { asInt, forwardUpstreamHeaders, parseResponsesUsage } from "./server-helpers.js";
 import type { Backend, GatewayUsage } from "./server-types.js";
 import { recordGatewayUsage } from "./usage-accounting.js";
+
+/**
+ * OpenAI Responses API events that close a response and carry its final usage. `response.done` is
+ * the name the ChatGPT Codex WebSocket transport uses for what SSE calls `response.completed`.
+ */
+const RESPONSES_TERMINAL_EVENTS = new Set([
+  "response.completed", "response.incomplete", "response.done",
+]);
+
+function emptyUsage(model: string): GatewayUsage {
+  return {
+    model,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+  };
+}
 
 interface StreamResponseOptions {
   res: http.ServerResponse;
@@ -151,19 +169,33 @@ async function persistStreamUsage(
   });
 }
 
-class StreamUsageParser {
-  readonly usage: GatewayUsage;
+/**
+ * Accumulates provider usage off a response stream. Understands three protocols: Anthropic Messages
+ * SSE, OpenAI chat-completions SSE, and the OpenAI Responses API (SSE or, via `applyMessage`, the
+ * Codex WebSocket transport, which frames the very same JSON events).
+ */
+export class StreamUsageParser {
+  usage: GatewayUsage;
+  private readonly initialModel: string;
   private buffer = "";
   private terminalEvent = false;
 
   constructor(model: string) {
-    this.usage = {
-      model,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationInputTokens: 0,
-      cacheReadInputTokens: 0,
-    };
+    this.initialModel = model;
+    this.usage = emptyUsage(model);
+  }
+
+  /** Feed one already-framed JSON event (WebSocket transport). Malformed payloads are ignored. */
+  applyMessage(payload: string): void {
+    try {
+      this.applyPayload(JSON.parse(payload));
+    } catch { /* ignore malformed payloads */ }
+  }
+
+  /** Drop accumulated usage so one long-lived connection can account several responses. */
+  reset(): void {
+    this.usage = emptyUsage(this.initialModel);
+    this.terminalEvent = false;
   }
 
   push(chunk: string): void {
@@ -197,6 +229,7 @@ class StreamUsageParser {
   }
 
   private applyPayload(data: any): void {
+    if (this.applyResponsesPayload(data)) return;
     if (data.type === "message_stop") this.terminalEvent = true;
     if (data.type === "message_start" && data.message?.usage) {
       const usage = data.message.usage;
@@ -208,6 +241,38 @@ class StreamUsageParser {
       this.usage.outputTokens = asInt(data.usage.output_tokens ?? 0);
     }
     if (data.usage) this.applyGenericUsage(data.usage);
+  }
+
+  /**
+   * Handle one OpenAI Responses API stream event (`/v1/responses`, ChatGPT Codex backend), where
+   * usage hangs off the terminal event's `response` object rather than the top level. Returns true
+   * when the event belonged to that protocol, so the caller skips the Anthropic / chat-completions
+   * branches — Responses delta events never carry a top-level `usage`, and letting the generic
+   * branch see them could overwrite the normalized totals.
+   *
+   * The model name is taken from `response.model` when the caller could not supply one. That is the
+   * case for Codex: PI zstd-compresses the request body, so the gateway's `extractModel()` cannot
+   * read it and would otherwise record the request as `<provider>/unknown`.
+   */
+  private applyResponsesPayload(data: any): boolean {
+    const type = typeof data?.type === "string" ? data.type : "";
+    if (!type.startsWith("response.")) return false;
+
+    const response = data.response;
+    if (!response || typeof response !== "object") return true;
+    if (!this.usage.model && typeof response.model === "string") this.usage.model = response.model;
+    if (!RESPONSES_TERMINAL_EVENTS.has(type)) return true;
+
+    this.terminalEvent = true;
+    const usage = response.usage;
+    if (!usage || typeof usage !== "object") return true;
+    const parsed = parseResponsesUsage(this.usage.model, usage);
+    if (!parsed) return true;
+    this.usage.inputTokens = parsed.inputTokens;
+    this.usage.outputTokens = parsed.outputTokens;
+    this.usage.cacheCreationInputTokens = parsed.cacheCreationInputTokens;
+    this.usage.cacheReadInputTokens = parsed.cacheReadInputTokens;
+    return true;
   }
 
   private applyGenericUsage(usage: any): void {
