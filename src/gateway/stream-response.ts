@@ -43,6 +43,8 @@ interface StreamResponseOptions {
   metadata?: Record<string, string>;
   pricing: CostCalculator;
   tracker: UsageTracker;
+  /** Overrides `upstream.body`, for a stream whose first chunk was already read to classify it. */
+  bodyReader?: ChunkReader;
   dumpApiCall: (
     requestBody: Buffer | undefined,
     responseBody: Buffer | undefined,
@@ -52,9 +54,61 @@ interface StreamResponseOptions {
   ) => void;
 }
 
+/**
+ * Classify an upstream body that did not announce itself as SSE.
+ *
+ * The ChatGPT Codex backend answers a streaming request with `content-type: application/json` and
+ * then writes an event stream anyway, so trusting the header alone would buffer the whole stream and
+ * leave its usage unparsed. Sniffing the first chunk is provider-agnostic and costs nothing: a
+ * genuine JSON response has to be read in full regardless.
+ */
+export type BodyProbe =
+  | { kind: "event-stream"; reader: ChunkReader }
+  | { kind: "buffer"; body: Buffer };
+
+export async function probeUpstreamBody(upstream: Response): Promise<BodyProbe> {
+  if (!upstream.body) return { kind: "buffer", body: Buffer.alloc(0) };
+  const reader = upstream.body.getReader();
+
+  const first = await reader.read();
+  if (first.done || !first.value) return { kind: "buffer", body: Buffer.alloc(0) };
+  const head = Buffer.from(first.value);
+  if (looksLikeEventStream(head)) return { kind: "event-stream", reader: replayingReader(head, reader) };
+
+  const chunks = [head];
+  for (;;) {
+    const next = await reader.read();
+    if (next.done) break;
+    if (next.value) chunks.push(Buffer.from(next.value));
+  }
+  return { kind: "buffer", body: Buffer.concat(chunks) };
+}
+
+/** SSE payloads open with a field name or a comment line (RFC 8895 §7 / WHATWG event-stream). */
+function looksLikeEventStream(head: Buffer): boolean {
+  const start = head.subarray(0, 64).toString("utf-8").replace(/^[\s﻿]+/, "");
+  return /^(event|data|id|retry):/.test(start) || start.startsWith(":");
+}
+
+/** Hands back the already-consumed chunk before continuing with the live reader. */
+function replayingReader(head: Buffer, reader: ReadableStreamDefaultReader<Uint8Array>): ChunkReader {
+  let pending: Buffer | null = head;
+  return {
+    async read() {
+      if (pending) {
+        const value = pending;
+        pending = null;
+        return { done: false, value };
+      }
+      return reader.read();
+    },
+  };
+}
+
 export async function streamGatewayResponse(options: StreamResponseOptions): Promise<void> {
+  const reader = options.bodyReader ?? options.upstream.body?.getReader();
   writeStreamHeaders(options);
-  if (!options.upstream.body) {
+  if (!reader) {
     options.res.end();
     return;
   }
@@ -63,7 +117,7 @@ export async function streamGatewayResponse(options: StreamResponseOptions): Pro
   const dumpChunks: Buffer[] = [];
   let completed: boolean;
   try {
-    completed = await pipeStreamWithErrors(options, parser, dumpChunks);
+    completed = await pipeStreamWithErrors(options, reader, parser, dumpChunks);
   } catch (error) {
     abortStream(options.res);
     throw error;
@@ -99,11 +153,12 @@ function writeStreamHeaders(options: StreamResponseOptions): void {
 
 async function pipeStreamWithErrors(
   options: StreamResponseOptions,
+  reader: ChunkReader,
   parser: StreamUsageParser,
   dumpChunks: Buffer[],
 ): Promise<boolean> {
   try {
-    await pipeStream(options, parser, dumpChunks);
+    await pipeStream(options, reader, parser, dumpChunks);
     return true;
   } catch (error) {
     if (error instanceof UpstreamStreamReadError) return parser.hasTerminalEvent();
@@ -113,10 +168,11 @@ async function pipeStreamWithErrors(
 
 async function pipeStream(
   options: StreamResponseOptions,
+  reader: ChunkReader,
   parser: StreamUsageParser,
   dumpChunks: Buffer[],
 ): Promise<void> {
-  const chunks = sourceChunks(options.upstream.body!.getReader(), parser, dumpChunks);
+  const chunks = sourceChunks(reader, parser, dumpChunks);
   if (options.backend.translate === "anthropic-to-openai") {
     for await (const translated of openaiSseToAnthropicSse(chunks, options.originalModel)) {
       options.res.write(translated);
@@ -128,9 +184,12 @@ async function pipeStream(
 
 class UpstreamStreamReadError extends Error {}
 
-async function readSource(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-): Promise<ReadableStreamReadResult<Uint8Array>> {
+/** The slice of a stream reader the Gateway uses, so a sniffed stream can be replayed into it. */
+export interface ChunkReader {
+  read(): Promise<{ done: boolean; value?: Uint8Array }>;
+}
+
+async function readSource(reader: ChunkReader): Promise<{ done: boolean; value?: Uint8Array }> {
   try {
     return await reader.read();
   } catch {
@@ -139,13 +198,13 @@ async function readSource(
 }
 
 async function* sourceChunks(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
+  reader: ChunkReader,
   parser: StreamUsageParser,
   dumpChunks: Buffer[],
 ): AsyncGenerator<Buffer> {
   while (true) {
     const { done, value } = await readSource(reader);
-    if (done) return;
+    if (done || !value) return;
     const chunk = Buffer.from(value);
     parser.push(chunk.toString("utf-8"));
     dumpChunks.push(chunk);

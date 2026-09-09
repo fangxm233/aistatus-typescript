@@ -60,21 +60,22 @@ function responsesSseBody(usage, { model = "gpt-5.6-sol" } = {}) {
   return events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
 }
 
-function sseResponse(body) {
-  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+function sseResponse(body, contentType = "text/event-stream") {
+  return new Response(body, { status: 200, headers: { "content-type": contentType } });
 }
 
-async function runCodexStream(tag, { requestBody, responseBody }) {
+async function runCodexStream(tag, { requestBody, responseBody, contentType }) {
   const { GatewayServer } = await import(`../dist/gateway/index.js?${tag}=${Date.now()}`);
   const { UsageStorage, UsageTracker } = await import(`../dist/index.js?${tag}=${Date.now()}`);
 
   const savedFetch = globalThis.fetch;
-  globalThis.fetch = async () => sseResponse(responseBody);
+  globalThis.fetch = async () => sseResponse(responseBody, contentType);
   const port = await freePort();
   const server = new GatewayServer(codexConfig(port));
   server.usage = new UsageTracker(new UsageStorage(tempUsageDir(), `/${tag}`));
   const httpServer = http.createServer((req, res) => server._handleRequest(req, res));
   await new Promise((resolve) => httpServer.listen(port, "127.0.0.1", resolve));
+  let responseHeaders = {};
 
   try {
     await new Promise((resolve, reject) => {
@@ -83,6 +84,7 @@ async function runCodexStream(tag, { requestBody, responseBody }) {
         path: "/m/openai-codex/project=demo,trigger=user/openai-codex/codex/responses",
         headers: { "content-type": "application/json", authorization: "Bearer sk-user-oauth" },
       }, (res) => {
+        responseHeaders = res.headers;
         res.on("data", () => {});
         res.on("error", reject);
         res.on("end", resolve);
@@ -90,7 +92,7 @@ async function runCodexStream(tag, { requestBody, responseBody }) {
       req.on("error", reject);
       req.end(requestBody);
     });
-    return server.usage.storage.read("all");
+    return { records: server.usage.storage.read("all"), responseHeaders };
   } finally {
     globalThis.fetch = savedFetch;
     httpServer.close();
@@ -98,7 +100,7 @@ async function runCodexStream(tag, { requestBody, responseBody }) {
 }
 
 test("Gateway records usage from an OpenAI Responses stream and splits out cached input", async () => {
-  const records = await runCodexStream("codex-usage", {
+  const { records } = await runCodexStream("codex-usage", {
     requestBody: JSON.stringify({ model: "gpt-5.6-sol", input: [], stream: true }),
     responseBody: responsesSseBody({
       input_tokens: 1000,
@@ -129,7 +131,7 @@ test("Gateway records usage from an OpenAI Responses stream and splits out cache
 test("Gateway names the Codex model from the stream when the request body is unreadable", async () => {
   // PI zstd-compresses the Codex SSE request body, so `extractModel()` cannot parse it. Without a
   // model recovered from the stream the record would land as `openai-codex/unknown`.
-  const records = await runCodexStream("codex-zstd", {
+  const { records } = await runCodexStream("codex-zstd", {
     requestBody: Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x58, 0x99, 0x00, 0x00]),
     responseBody: responsesSseBody({
       input_tokens: 120,
@@ -146,10 +148,48 @@ test("Gateway names the Codex model from the stream when the request body is unr
   assert.equal(record.out, 7);
 });
 
+test("Gateway streams and accounts an event stream mislabelled as application/json", async () => {
+  // This is what the real ChatGPT Codex backend does. Trusting the header would buffer the whole
+  // stream and hand it to the JSON usage parser, which is exactly how Codex usage went unrecorded.
+  const { records, responseHeaders } = await runCodexStream("codex-mislabelled", {
+    contentType: "application/json",
+    requestBody: JSON.stringify({ model: "gpt-5.6-sol", input: [], stream: true }),
+    responseBody: responsesSseBody({
+      input_tokens: 18,
+      input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+      output_tokens: 5,
+    }),
+  });
+
+  assert.equal(records.length, 1);
+  assert.equal(records[0].model, "gpt-5.6-sol");
+  assert.equal(records[0].in, 18);
+  assert.equal(records[0].out, 5);
+  // The client is told the truth about what it is receiving, and gets it incrementally.
+  assert.equal(responseHeaders["content-type"], "text/event-stream");
+});
+
+test("Gateway still buffers a genuine JSON response", async () => {
+  const { records, responseHeaders } = await runCodexStream("codex-json", {
+    contentType: "application/json",
+    requestBody: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+    responseBody: JSON.stringify({
+      id: "resp_1", model: "gpt-5.6-sol",
+      usage: { input_tokens: 30, input_tokens_details: { cached_tokens: 10 }, output_tokens: 4 },
+    }),
+  });
+
+  assert.equal(responseHeaders["content-type"], "application/json");
+  assert.equal(records.length, 1);
+  assert.equal(records[0].in, 20);
+  assert.equal(records[0].cache_read_in, 10);
+  assert.equal(records[0].out, 4);
+});
+
 test("Gateway leaves Anthropic usage untouched", async () => {
   // Anthropic carries no `input_tokens_details`, so it must not be re-normalized: its
   // `input_tokens` already excludes the cached prefix and subtracting again would zero it out.
-  const anthropic = await runCodexStream("codex-anthropic", {
+  const { records: anthropic } = await runCodexStream("codex-anthropic", {
     requestBody: JSON.stringify({ model: "claude-opus-5", messages: [] }),
     responseBody:
       'data: {"type":"message_start","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":400}}}\n\n'

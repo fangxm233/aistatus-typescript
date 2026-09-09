@@ -40,7 +40,7 @@ import {
   handleStatus,
   handleUsage,
 } from "./server-info.js";
-import { streamGatewayResponse } from "./stream-response.js";
+import { probeUpstreamBody, streamGatewayResponse, type ChunkReader } from "./stream-response.js";
 import { proxyWebSocket, refuseUpgrade } from "./websocket-proxy.js";
 import type { Backend } from "./server-types.js";
 import { recordGatewayUsage } from "./usage-accounting.js";
@@ -562,13 +562,18 @@ export class GatewayServer {
     if (model) this.health.recordSuccess(backend.id, model);
 
     const contentType = upstreamRes.headers.get("content-type") ?? "";
-    const isStreaming = contentType.includes("text/event-stream");
-
-    if (isStreaming) {
+    if (contentType.includes("text/event-stream")) {
       await this._stream(res, upstreamRes, backend, originalModel, fallbackHeader, elapsedMs, billingMode, body, metadata);
-    } else {
-      await this._respond(res, upstreamRes, backend, originalModel, elapsedMs, fallbackHeader, billingMode, body, metadata);
+      return;
     }
+
+    // The ChatGPT Codex backend labels its event streams `application/json`, so the body decides.
+    const probe = await probeUpstreamBody(upstreamRes);
+    if (probe.kind === "event-stream") {
+      await this._stream(res, upstreamRes, backend, originalModel, fallbackHeader, elapsedMs, billingMode, body, metadata, probe.reader);
+      return;
+    }
+    await this._respond(res, upstreamRes, probe.body, backend, originalModel, elapsedMs, fallbackHeader, billingMode, body, metadata);
   }
 
   private _observeQuota(upstream: Response, backend: Backend, billingMode?: string): void {
@@ -584,6 +589,7 @@ export class GatewayServer {
   private async _respond(
     res: http.ServerResponse,
     upstream: Response,
+    responseBody: Buffer,
     backend: Backend,
     originalModel: string,
     elapsedMs: number,
@@ -592,8 +598,7 @@ export class GatewayServer {
     requestBody?: Buffer,
     metadata?: Record<string, string>,
   ): Promise<void> {
-    const ab = await upstream.arrayBuffer();
-    let respBody: Buffer = Buffer.from(ab as ArrayBuffer);
+    let respBody: Buffer = responseBody;
 
     let contentType: string;
     let charset: string | undefined;
@@ -643,6 +648,7 @@ export class GatewayServer {
     billingMode?: string,
     requestBody?: Buffer,
     metadata?: Record<string, string>,
+    bodyReader?: ChunkReader,
   ): Promise<void> {
     await streamGatewayResponse({
       res, upstream, backend, originalModel, fallbackHeader, elapsedMs,
@@ -650,6 +656,7 @@ export class GatewayServer {
       defaultBillingMode: this.config.mode,
       requestBody,
       metadata,
+      bodyReader,
       pricing: this.pricing,
       tracker: this.usage,
       dumpApiCall: this._dumpApiCall.bind(this),
