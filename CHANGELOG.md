@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.9 — 2026-09-14
+
+### Usage
+
+- **Spend can be split by billing mode** — `billing_mode` joins `model` and `provider` as a grouping key, so subscription traffic and metered traffic no longer sit in one undifferentiated total. Records written without a billing mode group under `unknown`.
+- **Grouping accepts several keys at once** — `group_by` now takes a list. `?group_by=provider,billing_mode` answers "what did each provider cost me on plan versus on API" in one pass over the index, instead of requiring one query per slice and a client-side join. A single key keeps its existing envelope (`providers` / `models` / `billing_modes`); a combination returns a `rows` array whose entries carry every requested key. Unknown or repeated keys are refused with HTTP 400.
+
 ## 0.0.8 — 2026-09-08
 
 ### Gateway — OpenAI Responses API / ChatGPT Codex
