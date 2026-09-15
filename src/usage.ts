@@ -1,5 +1,5 @@
 // input:  usage payloads, JSONL storage and upload bridge
-// output: persisted records and indexed aggregate reports
+// output: persisted records and indexed aggregate reports, grouped by one or more keys
 // pos:    Shared usage persistence and reporting API
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
-import { UsageAggregateIndex, periodSinceMs, type UsageGroupKey } from "./usage-index.js";
+import { UsageAggregateIndex, normalizeGroupKeys, periodSinceMs, type UsageGroupKey } from "./usage-index.js";
 
 interface UsageUploadRecord extends Record<string, unknown> {
   ts: string;
@@ -52,7 +52,7 @@ export class UsageStorage {
     fs.appendFileSync(filePath, JSON.stringify(record) + "\n", "utf-8");
   }
 
-  aggregate(period = "month", groupBy?: UsageGroupKey): Record<string, unknown> {
+  aggregate(period = "month", groupBy?: UsageGroupKey | UsageGroupKey[]): Record<string, unknown> {
     return this._aggregateIndex.report(period, groupBy);
   }
 
@@ -200,11 +200,13 @@ export class UsageTracker {
     this.storage.prewarm?.(period);
   }
 
-  report(period = "month", groupBy?: UsageGroupKey): Record<string, unknown> {
+  report(period = "month", groupBy?: UsageGroupKey | UsageGroupKey[]): Record<string, unknown> {
     if (typeof this.storage.aggregate === "function") return this.storage.aggregate(period, groupBy);
     const records = this.storage.read(period);
+    const keys = normalizeGroupKeys(groupBy);
     const result: Record<string, unknown> = { summary: summarizeUsage(records, period) };
-    if (groupBy) result[`${groupBy}s`] = groupUsage(records, groupBy);
+    if (keys.length === 0) return result;
+    result[keys.length === 1 ? `${keys[0]}s` : "rows"] = groupUsage(records, keys);
     return result;
   }
 
@@ -249,19 +251,31 @@ function summarizeUsage(records: Array<Record<string, unknown>>, period: string)
 
 function groupUsage(
   records: Array<Record<string, unknown>>,
-  key: UsageGroupKey,
+  keys: UsageGroupKey[],
 ): Array<Record<string, unknown>> {
-  const buckets = new Map<string, UsageBucket>();
+  const buckets = new Map<string, { names: string[]; bucket: UsageBucket }>();
   for (const record of records) {
-    const bucketKey = String(record[key] ?? "unknown");
-    const bucket = buckets.get(bucketKey) ?? emptyUsageBucket();
-    addToUsageBucket(bucket, record);
-    buckets.set(bucketKey, bucket);
+    const names = keys.map(key => String(record[key] ?? "unknown"));
+    const bucketKey = JSON.stringify(names);
+    const entry = buckets.get(bucketKey) ?? { names, bucket: emptyUsageBucket() };
+    addToUsageBucket(entry.bucket, record);
+    buckets.set(bucketKey, entry);
   }
-  const rows = [...buckets].map(([bucketKey, bucket]) => usageBucketRow(key, bucketKey, bucket));
-  rows.sort((a, b) => (asFloat(b.cost_usd) - asFloat(a.cost_usd))
-    || String(a[key] ?? "").localeCompare(String(b[key] ?? "")));
+  const rows = [...buckets.values()].map(({ names, bucket }) => usageBucketRow(keys, names, bucket));
+  rows.sort((a, b) => (asFloat(b.cost_usd) - asFloat(a.cost_usd)) || compareGroupNames(keys, a, b));
   return rows;
+}
+
+function compareGroupNames(
+  keys: UsageGroupKey[],
+  a: Record<string, unknown>,
+  b: Record<string, unknown>,
+): number {
+  for (const key of keys) {
+    const order = String(a[key] ?? "").localeCompare(String(b[key] ?? ""));
+    if (order !== 0) return order;
+  }
+  return 0;
 }
 
 function emptyUsageBucket(): UsageBucket {
@@ -281,12 +295,12 @@ function addToUsageBucket(bucket: UsageBucket, record: Record<string, unknown>):
 }
 
 function usageBucketRow(
-  key: UsageGroupKey,
-  bucketKey: string,
+  keys: UsageGroupKey[],
+  names: string[],
   bucket: UsageBucket,
 ): Record<string, unknown> {
   return {
-    [key]: bucketKey,
+    ...Object.fromEntries(keys.map((key, index) => [key, names[index]])),
     requests: bucket.requests,
     input_tokens: bucket.input_tokens,
     output_tokens: bucket.output_tokens,

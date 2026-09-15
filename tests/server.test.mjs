@@ -943,6 +943,60 @@ test("Gateway server uses one indexed aggregate for a grouped report", async () 
   }
 });
 
+test("Gateway server splits usage by provider and billing mode", async () => {
+  const { GatewayServer } = await import("../dist/gateway/index.js");
+  const { UsageTracker, UsageStorage } = await import("../dist/index.js");
+  const config = {
+    host: "127.0.0.1", port: 0, status_check: false, mode: "default",
+    endpoints: {}, endpoint_modes: { default: {} },
+  };
+  const server = new GatewayServer(config);
+  const tmpDir = makeTempUsageTrackerConfig();
+  const storage = new UsageStorage(tmpDir, `/test/billing-split-${Date.now()}`);
+  const now = new Date().toISOString();
+  storage.append({
+    ts: now, provider: "anthropic", model: "claude-opus-4-6",
+    in: 3, out: 2, cost: 0, latency_ms: 100, fallback: false, billing_mode: "plan",
+  });
+  storage.append({
+    ts: now, provider: "anthropic", model: "claude-opus-4-6",
+    in: 3, out: 2, cost: 0.5, latency_ms: 100, fallback: false, billing_mode: "api",
+  });
+  server.usage = new UsageTracker(storage);
+  const httpServer = http.createServer((req, res) => {
+    server._handleRequest(req, res).catch(() => {
+      if (!res.headersSent) res.writeHead(500);
+      res.end();
+    });
+  });
+  await new Promise(resolve => httpServer.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const port = httpServer.address().port;
+    const combined = await request(port, "/usage?period=today&group_by=provider,billing_mode");
+    assert.equal(combined.status, 200);
+    const body = JSON.parse(combined.body);
+    assert.equal(body.summary.requests, 2);
+    assert.deepEqual(body.rows.map(row => [row.provider, row.billing_mode, row.cost_usd]), [
+      ["anthropic", "api", 0.5],
+      ["anthropic", "plan", 0],
+    ]);
+
+    const single = await request(port, "/usage?period=today&group_by=billing_mode");
+    assert.equal(single.status, 200);
+    assert.deepEqual(JSON.parse(single.body).billing_modes.map(row => row.billing_mode), ["api", "plan"]);
+
+    // Repeated keys would collapse into a meaningless cross-product, so they are refused.
+    const repeated = await request(port, "/usage?group_by=provider,provider");
+    assert.equal(repeated.status, 400);
+    const unknown = await request(port, "/usage?group_by=provider,endpoint");
+    assert.equal(unknown.status, 400);
+  } finally {
+    await new Promise(resolve => httpServer.close(resolve));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 function subscriptionGatewayConfig() {
   const anthropic = {
     name: "anthropic", base_url: "https://api.anthropic.test", auth_style: "bearer",

@@ -1,4 +1,4 @@
-// input:  JSONL usage files, period and grouping key
+// input:  JSONL usage files, period and zero or more grouping keys
 // output: exact incremental aggregate reports and prewarm
 // pos:    Compact index for low-latency usage summaries
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
@@ -6,12 +6,27 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-export type UsageGroupKey = "model" | "provider";
+export const USAGE_GROUP_KEYS = ["model", "provider", "billing_mode"] as const;
+
+export type UsageGroupKey = (typeof USAGE_GROUP_KEYS)[number];
+
+/** Accept a single key or a list of keys, and always hand the aggregator a list. */
+export function normalizeGroupKeys(groupBy?: UsageGroupKey | UsageGroupKey[]): UsageGroupKey[] {
+  if (groupBy === undefined) return [];
+  return Array.isArray(groupBy) ? [...groupBy] : [groupBy];
+}
+
+interface UsageInterners {
+  provider(value: string): number;
+  model(value: string): number;
+  billingMode(value: string): number;
+}
 
 interface UsageColumns {
   timestamps: number[];
   providerIds: number[];
   modelIds: number[];
+  billingModeIds: number[];
   inputs: number[];
   outputs: number[];
   costs: number[];
@@ -53,8 +68,13 @@ export class UsageAggregateIndex {
   private readonly providers: string[] = [];
   private readonly modelIds = new Map<string, number>();
   private readonly models: string[] = [];
-  private readonly resolveProvider = (value: string) => this.providerId(value);
-  private readonly resolveModel = (value: string) => this.modelId(value);
+  private readonly billingModeIds = new Map<string, number>();
+  private readonly billingModes: string[] = [];
+  private readonly interners: UsageInterners = {
+    provider: (value) => internString(value, this.providerIds, this.providers),
+    model: (value) => internString(value, this.modelIds, this.models),
+    billingMode: (value) => internString(value, this.billingModeIds, this.billingModes),
+  };
 
   constructor(private readonly projectDir: string) {}
 
@@ -62,16 +82,20 @@ export class UsageAggregateIndex {
     this.syncFiles(period);
   }
 
-  report(period = "month", groupBy?: UsageGroupKey): Record<string, unknown> {
+  report(period = "month", groupBy?: UsageGroupKey | UsageGroupKey[]): Record<string, unknown> {
+    const keys = normalizeGroupKeys(groupBy);
     const sinceMs = periodSinceMs(period);
     const paths = this.syncFiles(period);
+    // Read the dictionaries after syncing, so every interned name is already known.
+    const names = keys.map((key) => this.groupNames(key));
+    const radix = names.map((list) => Math.max(list.length, 1));
     const summary = emptyBucket();
     const groups = new Map<number, UsageBucket>();
     for (const filePath of paths) {
       const indexed = this.files.get(filePath);
-      if (indexed) aggregateColumns(indexed.columns, sinceMs, groupBy, summary, groups);
+      if (indexed) aggregateColumns(indexed.columns, sinceMs, keys, radix, summary, groups);
     }
-    return buildReport(period, groupBy, summary, groups, this.groupNames(groupBy));
+    return buildReport(period, keys, radix, summary, groups, names);
   }
 
   private syncFiles(period: string): string[] {
@@ -93,7 +117,7 @@ export class UsageAggregateIndex {
   private loadFile(filePath: string): IndexedUsageFile {
     const columns = emptyColumns();
     const scan = scanCompleteLines(filePath, 0, (record) => {
-      appendRecord(columns, record, this.resolveProvider, this.resolveModel);
+      appendRecord(columns, record, this.interners);
     });
     return {
       columns,
@@ -108,7 +132,7 @@ export class UsageAggregateIndex {
 
   private extendFile(filePath: string, indexed: IndexedUsageFile): void {
     const scan = scanCompleteLines(filePath, indexed.readOffset, (record) => {
-      appendRecord(indexed.columns, record, this.resolveProvider, this.resolveModel);
+      appendRecord(indexed.columns, record, this.interners);
     });
     indexed.readOffset = scan.readOffset;
     indexed.guard = readGuard(filePath, scan.readOffset);
@@ -118,16 +142,10 @@ export class UsageAggregateIndex {
     indexed.ctimeMs = scan.stat.ctimeMs;
   }
 
-  private providerId(value: string): number {
-    return internString(value, this.providerIds, this.providers);
-  }
-
-  private modelId(value: string): number {
-    return internString(value, this.modelIds, this.models);
-  }
-
-  private groupNames(groupBy?: UsageGroupKey): string[] {
-    return groupBy === "model" ? this.models : this.providers;
+  private groupNames(groupBy: UsageGroupKey): string[] {
+    if (groupBy === "model") return this.models;
+    if (groupBy === "billing_mode") return this.billingModes;
+    return this.providers;
   }
 }
 
@@ -227,20 +245,20 @@ function parseLine(line: Buffer, onRecord: (record: Record<string, unknown>) => 
 
 function emptyColumns(): UsageColumns {
   return {
-    timestamps: [], providerIds: [], modelIds: [], inputs: [], outputs: [],
-    costs: [], fallbacks: [], latencies: [],
+    timestamps: [], providerIds: [], modelIds: [], billingModeIds: [],
+    inputs: [], outputs: [], costs: [], fallbacks: [], latencies: [],
   };
 }
 
 function appendRecord(
   columns: UsageColumns,
   record: Record<string, unknown>,
-  providerId: (value: string) => number,
-  modelId: (value: string) => number,
+  interners: UsageInterners,
 ): void {
   columns.timestamps.push(timestampValue(record.ts));
-  columns.providerIds.push(providerId(String(record.provider ?? "unknown")));
-  columns.modelIds.push(modelId(String(record.model ?? "unknown")));
+  columns.providerIds.push(interners.provider(String(record.provider ?? "unknown")));
+  columns.modelIds.push(interners.model(String(record.model ?? "unknown")));
+  columns.billingModeIds.push(interners.billingMode(String(record.billing_mode ?? "unknown")));
   columns.inputs.push(asInt(record.in));
   columns.outputs.push(asInt(record.out));
   columns.costs.push(asFloat(record.cost));
@@ -257,20 +275,40 @@ function timestampValue(value: unknown): number {
 function aggregateColumns(
   columns: UsageColumns,
   sinceMs: number | null,
-  groupBy: UsageGroupKey | undefined,
+  groupBy: UsageGroupKey[],
+  radix: number[],
   summary: UsageBucket,
   groups: Map<number, UsageBucket>,
 ): void {
-  const ids = groupBy ? groupIds(columns, groupBy) : null;
+  const idColumns = groupBy.map((key) => groupIds(columns, key));
   for (let i = 0; i < columns.timestamps.length; i++) {
     if (sinceMs !== null && columns.timestamps[i] < sinceMs) continue;
     addIndexedValue(summary, columns, i, false);
-    if (ids) addGroupedValue(groups, ids[i], columns, i);
+    if (idColumns.length > 0) addGroupedValue(groups, compositeId(idColumns, radix, i), columns, i);
   }
 }
 
+/** Pack one id per grouping key into a single bucket key, mixed-radix style. */
+function compositeId(idColumns: number[][], radix: number[], index: number): number {
+  let id = 0;
+  for (let d = 0; d < idColumns.length; d++) id = id * radix[d] + idColumns[d][index];
+  return id;
+}
+
+function decomposeId(id: number, radix: number[]): number[] {
+  const ids = new Array<number>(radix.length);
+  let remaining = id;
+  for (let d = radix.length - 1; d >= 0; d--) {
+    ids[d] = remaining % radix[d];
+    remaining = Math.floor(remaining / radix[d]);
+  }
+  return ids;
+}
+
 function groupIds(columns: UsageColumns, groupBy: UsageGroupKey): number[] {
-  return groupBy === "model" ? columns.modelIds : columns.providerIds;
+  if (groupBy === "model") return columns.modelIds;
+  if (groupBy === "billing_mode") return columns.billingModeIds;
+  return columns.providerIds;
 }
 
 function addGroupedValue(groups: Map<number, UsageBucket>, id: number, columns: UsageColumns, index: number): void {
@@ -291,21 +329,43 @@ function addIndexedValue(bucket: UsageBucket, columns: UsageColumns, index: numb
 
 function buildReport(
   period: string,
-  groupBy: UsageGroupKey | undefined,
+  groupBy: UsageGroupKey[],
+  radix: number[],
   summary: UsageBucket,
   groups: Map<number, UsageBucket>,
-  names: string[],
+  names: string[][],
 ): Record<string, unknown> {
   const result: Record<string, unknown> = { summary: bucketSummary(summary, period) };
-  if (groupBy) result[`${groupBy}s`] = groupedRows(groupBy, groups, names);
+  if (groupBy.length === 0) return result;
+  const envelope = groupBy.length === 1 ? `${groupBy[0]}s` : "rows";
+  result[envelope] = groupedRows(groupBy, radix, groups, names);
   return result;
 }
 
-function groupedRows(key: UsageGroupKey, groups: Map<number, UsageBucket>, names: string[]): Array<Record<string, unknown>> {
-  const rows = [...groups].map(([id, bucket]) => bucketRow(key, names[id] ?? "unknown", bucket));
-  rows.sort((a, b) => asFloat(b.cost_usd) - asFloat(a.cost_usd)
-    || String(a[key] ?? "").localeCompare(String(b[key] ?? "")));
+function groupedRows(
+  keys: UsageGroupKey[],
+  radix: number[],
+  groups: Map<number, UsageBucket>,
+  names: string[][],
+): Array<Record<string, unknown>> {
+  const rows = [...groups].map(([id, bucket]) => {
+    const ids = decomposeId(id, radix);
+    return bucketRow(keys.map((key, d) => [key, names[d][ids[d]] ?? "unknown"] as const), bucket);
+  });
+  rows.sort((a, b) => asFloat(b.cost_usd) - asFloat(a.cost_usd) || compareGroupNames(keys, a, b));
   return rows;
+}
+
+function compareGroupNames(
+  keys: UsageGroupKey[],
+  a: Record<string, unknown>,
+  b: Record<string, unknown>,
+): number {
+  for (const key of keys) {
+    const order = String(a[key] ?? "").localeCompare(String(b[key] ?? ""));
+    if (order !== 0) return order;
+  }
+  return 0;
 }
 
 function bucketSummary(bucket: UsageBucket, period: string): Record<string, unknown> {
@@ -320,9 +380,12 @@ function bucketSummary(bucket: UsageBucket, period: string): Record<string, unkn
   };
 }
 
-function bucketRow(key: UsageGroupKey, name: string, bucket: UsageBucket): Record<string, unknown> {
+function bucketRow(
+  group: ReadonlyArray<readonly [UsageGroupKey, string]>,
+  bucket: UsageBucket,
+): Record<string, unknown> {
   return {
-    [key]: name,
+    ...Object.fromEntries(group),
     requests: bucket.requests,
     input_tokens: bucket.input_tokens,
     output_tokens: bucket.output_tokens,

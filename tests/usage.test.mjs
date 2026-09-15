@@ -336,3 +336,66 @@ test("UsageTracker builds a grouped report from one storage read", async () => {
     ],
   });
 });
+
+test("UsageTracker groups the index by billing mode and by key combinations", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aistatus-index-billing-test-"));
+  try {
+    const { UsageStorage, UsageTracker } = await import("../dist/index.js");
+    const storage = new UsageStorage(tmpDir, "/test/index-billing");
+    const tracker = new UsageTracker(storage);
+    const now = new Date().toISOString();
+    storage.append(storedUsage(now, { provider: "anthropic", billing_mode: "plan", cost: 0 }));
+    storage.append(storedUsage(now, { provider: "anthropic", billing_mode: "api" }));
+    storage.append(storedUsage(now, { provider: "deepseek", billing_mode: "api", cost: 0.5 }));
+    storage.append(storedUsage(now, { provider: "deepseek" }));
+
+    const single = tracker.report("today", "billing_mode");
+    assert.deepEqual(single.billing_modes.map((row) => [row.billing_mode, row.requests, row.cost_usd]), [
+      ["api", 2, 0.75],
+      ["unknown", 1, 0.25],
+      ["plan", 1, 0],
+    ]);
+
+    const combined = tracker.report("today", ["provider", "billing_mode"]);
+    assert.deepEqual(combined.rows.map((row) => [row.provider, row.billing_mode, row.requests, row.cost_usd]), [
+      ["deepseek", "api", 1, 0.5],
+      ["anthropic", "api", 1, 0.25],
+      ["deepseek", "unknown", 1, 0.25],
+      ["anthropic", "plan", 1, 0],
+    ]);
+    assert.equal(combined.summary.requests, 4);
+    // A single key keeps its familiar envelope; a combination moves to `rows`.
+    assert.equal(combined.providers, undefined);
+    assert.equal(tracker.report("today", ["provider"]).providers.length, 2);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("UsageTracker groups record-backed storage by key combinations", async () => {
+  const { UsageTracker } = await import("../dist/index.js");
+  const tracker = new UsageTracker({
+    read() {
+      return [
+        { provider: "anthropic", billing_mode: "plan", in: 10, out: 4, cost: 0, latency_ms: 100, fallback: false },
+        { provider: "anthropic", billing_mode: "api", in: 20, out: 6, cost: 0.2, latency_ms: 200, fallback: true },
+        { provider: "anthropic", billing_mode: "api", in: 5, out: 2, cost: 0.3, latency_ms: 300, fallback: false },
+      ];
+    },
+  });
+
+  const report = tracker.report("all", ["provider", "billing_mode"]);
+
+  assert.equal(report.providers, undefined);
+  assert.deepEqual(report.rows, [
+    {
+      provider: "anthropic", billing_mode: "api", requests: 2, input_tokens: 25, output_tokens: 8,
+      cost_usd: 0.5, avg_latency_ms: 250, fallback_requests: 1,
+    },
+    {
+      provider: "anthropic", billing_mode: "plan", requests: 1, input_tokens: 10, output_tokens: 4,
+      cost_usd: 0, avg_latency_ms: 100, fallback_requests: 0,
+    },
+  ]);
+  assert.deepEqual(tracker.report("all", "billing_mode").billing_modes.map((row) => row.billing_mode), ["api", "plan"]);
+});

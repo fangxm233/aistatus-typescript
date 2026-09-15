@@ -5,6 +5,7 @@
 
 import * as http from "node:http";
 
+import { USAGE_GROUP_KEYS, type UsageGroupKey } from "../usage-index.js";
 import type { UsageTracker } from "../usage.js";
 import type { EndpointConfig, GatewayConfig } from "./config.js";
 import type { HealthTracker } from "./health.js";
@@ -106,14 +107,28 @@ function handleUsageSummary(
   res: http.ServerResponse,
 ): void {
   const period = query.period ?? "today";
-  const groupBy = query.group_by ?? "";
-  if (!validateUsageQuery(period, groupBy, res)) return;
+  const raw = query.group_by ?? "";
+  const groupBy = parseUsageGroupKeys(raw);
+  if (!validateUsageQuery(period, groupBy, raw, res)) return;
 
-  const grouped = groupBy === "model" || groupBy === "provider" ? groupBy : undefined;
-  jsonResponse(res, 200, tracker.report(period, grouped));
+  jsonResponse(res, 200, tracker.report(period, groupBy ?? []));
 }
 
-function validateUsageQuery(period: string, groupBy: string, res: http.ServerResponse): boolean {
+/** Parse `group_by` into grouping keys; null marks an unknown or repeated key. */
+function parseUsageGroupKeys(raw: string): UsageGroupKey[] | null {
+  if (raw.trim() === "") return [];
+  const keys = raw.split(",").map(key => key.trim());
+  const known = keys.every(key => (USAGE_GROUP_KEYS as readonly string[]).includes(key));
+  const distinct = new Set(keys).size === keys.length;
+  return known && distinct ? (keys as UsageGroupKey[]) : null;
+}
+
+function validateUsageQuery(
+  period: string,
+  groupBy: UsageGroupKey[] | null,
+  raw: string,
+  res: http.ServerResponse,
+): boolean {
   const validPeriods = ["today", "week", "month", "all"];
   if (!validPeriods.includes(period)) {
     jsonResponse(res, 400, {
@@ -121,9 +136,12 @@ function validateUsageQuery(period: string, groupBy: string, res: http.ServerRes
     });
     return false;
   }
-  if (["", "model", "provider"].includes(groupBy)) return true;
+  if (groupBy !== null) return true;
   jsonResponse(res, 400, {
-    error: { message: `Invalid group_by: ${groupBy}. Must be one of model,provider`, type: "gateway_error" },
+    error: {
+      message: `Invalid group_by: ${raw}. Must be distinct keys from ${USAGE_GROUP_KEYS.join(",")}`,
+      type: "gateway_error",
+    },
   });
   return false;
 }

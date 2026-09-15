@@ -492,7 +492,13 @@ auth:
 | `/mode`   | POST | Switch active configuration mode |
 
 The `/usage` endpoint supports `?period=today|week|month|all` and
-`?group_by=model|provider`.
+`?group_by=model|provider|billing_mode`.
+
+`group_by` also accepts several distinct keys, comma-separated — for example
+`?group_by=provider,billing_mode` to split each provider's spend into its subscription and
+metered traffic. A single key returns its familiar envelope (`providers` / `models` /
+`billing_modes`); a multi-key query returns a `rows` array whose entries carry every
+requested key. Unknown or repeated keys are rejected with HTTP 400.
 
 ### CLI Reference
 
