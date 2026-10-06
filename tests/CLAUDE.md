@@ -15,7 +15,7 @@ SDK 回归测试目录，覆盖 config、gateway server、usage、router、healt
 | `translate.test.mjs` | regression test | Verify Anthropic↔OpenAI payload and SSE translation |
 | `pricing.test.mjs` | regression test | Verify pricing arithmetic, caching, and shared refreshes |
 | `router-advanced.test.mjs` | regression test | Verify router health tracking, model fallback chains, 429 retry, cache tokens, and streaming |
-| `uploader.test.mjs` | regression test | Verify upload payload construction, config gating, and silent fire-and-forget fetch behavior |
+| `uploader.test.mjs` | regression test | Verify batched upload payloads, config gating, size/timer/exit flush triggers, retry with stable `batch_id`, 4xx drops, the 1000-record cap, flush timeouts, and gateway shutdown flushing |
 | `gateway-mode.test.mjs` | integration test | Verify isolated per-request mode routing and metadata usage |
 | `middleware.test.mjs` | regression test | Verify middleware hooks (beforeRequest, afterResponse, onError), execution order, dynamic use(), abort, tier routing, and fallback integration |
 | `gateway-auth.test.mjs` | regression test | Verify gateway API key authentication: Bearer/custom header, public paths, env var resolution, backward compatibility |

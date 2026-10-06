@@ -362,7 +362,7 @@ test("Gateway server paginates /usage?format=records with limit and offset", asy
 
 test("Gateway server uploads usage records after a successful proxied request", async () => {
   const { GatewayServer } = await import(`../dist/gateway/index.js?server-upload=${Date.now()}`);
-  const { configure } = await import(`../dist/index.js?server-upload=${Date.now()}`);
+  const { configure, flushUsageUploads } = await import(`../dist/index.js?server-upload=${Date.now()}`);
 
   const savedFetch = globalThis.fetch;
   const fetchCalls = [];
@@ -436,6 +436,7 @@ test("Gateway server uploads usage records after a successful proxied request", 
     });
 
     assert.equal(res.status, 200);
+    await flushUsageUploads();
     const uploadCall = fetchCalls.find((call) => String(call.input) === "https://aistatus.cc/api/usage/upload");
     assert.ok(uploadCall, "expected usage upload fetch call");
     const payload = JSON.parse(uploadCall.init.body);
@@ -447,6 +448,7 @@ test("Gateway server uploads usage records after a successful proxied request", 
     assert.equal(payload.records[0].output_tokens, 34);
   } finally {
     globalThis.fetch = savedFetch;
+    configure(null);
     httpServer.close();
   }
 });
@@ -639,6 +641,7 @@ test("Gateway server records usage for translated streaming responses", async ()
     assert.equal(records[0].out, 5);
   } finally {
     globalThis.fetch = savedFetch;
+    configure(null);
     httpServer.close();
   }
 });

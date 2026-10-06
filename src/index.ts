@@ -1,5 +1,5 @@
 // input: provider adapter registrations plus route/status/usage/pricing/config modules from the SDK runtime and release metadata
-// output: public aistatus SDK exports, default router helpers, version constant, and persistent upload config helpers for consumers
+// output: public aistatus SDK exports, default router helpers, version constant, persistent upload config helpers, and the usage upload flush API for consumers
 // pos: root SDK module that wires provider registrations and exposes the package's main API surface
 // >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
 
@@ -55,7 +55,7 @@ export {
   saveToFile,
   type AIStatusConfig,
 } from "./config";
-export { UsageUploader } from "./uploader";
+export { UsageUploader, flushUsageUploads } from "./uploader";
 export { CostCalculator } from "./pricing";
 export type { Middleware, BeforeRequestContext, AfterResponseContext } from "./middleware";
 

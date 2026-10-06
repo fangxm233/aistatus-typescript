@@ -1,5 +1,5 @@
 // input:  GatewayConfig, HTTP requests, provider responses
-// output: Proxy responses plus persisted usage and quota snapshots
+// output: Proxy responses plus persisted usage and quota snapshots; flushes queued usage uploads on shutdown
 // pos:    Gateway HTTP routing, accounting and quota runtime
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
 
@@ -17,7 +17,7 @@ import { UsageTracker } from "../usage.js";
 import { CostCalculator } from "../pricing.js";
 import { QuotaSnapshotStore } from "./quota-snapshot.js";
 import { getConfig } from "../config.js";
-import { UsageUploader } from "../uploader.js";
+import { UsageUploader, flushUsageUploads } from "../uploader.js";
 import {
   buildUpstreamHeaders,
   ensureThinkingBlocks,
@@ -153,16 +153,24 @@ export class GatewayServer {
     this._writePidFile();
     this._printBanner();
 
-    // Graceful shutdown
+    // Graceful shutdown: drain connections briefly, then flush queued usage uploads.
+    // Supervisors may SIGKILL 5s after SIGTERM, so the whole sequence stays under ~4s.
+    let stopping = false;
     const shutdown = () => {
+      if (stopping) return;
+      stopping = true;
       console.log("[gateway] Shutdown signal received, stopping gracefully...");
       this._removePidFile();
-      server.close(() => {
-        console.log("[gateway] Gateway stopped");
-        process.exit(0);
-      });
       // Force close after 5s
       setTimeout(() => process.exit(0), 5000).unref();
+      const closed = new Promise<void>(resolve => server.close(() => resolve()));
+      const drainBudget = new Promise<void>(resolve => setTimeout(resolve, 1000).unref());
+      void Promise.race([closed, drainBudget])
+        .then(() => flushUsageUploads(3000))
+        .finally(() => {
+          console.log("[gateway] Gateway stopped");
+          process.exit(0);
+        });
     };
 
     process.on("SIGTERM", shutdown);

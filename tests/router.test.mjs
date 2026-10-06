@@ -77,9 +77,10 @@ test("Router uploads usage records after successful route()", async () => {
     return Promise.resolve(new Response(null, { status: 204 }));
   };
 
+  let sdk;
   try {
-    const sdk = await import(`../dist/index.js?router-upload=${Date.now()}`);
-    const { Router, CheckResult, Status, registerAdapterType, ProviderAdapter, RouteResponse, configure } = sdk;
+    sdk = await import(`../dist/index.js?router-upload=${Date.now()}`);
+    const { Router, CheckResult, Status, registerAdapterType, ProviderAdapter, RouteResponse, configure, flushUsageUploads } = sdk;
 
     class UploadingAdapter extends ProviderAdapter {
       async call(modelId) {
@@ -115,6 +116,8 @@ test("Router uploads usage records after successful route()", async () => {
 
     const result = await router.route("hello", { model: "claude-sonnet-4-6" });
     assert.equal(result.content, "ok");
+    assert.equal(calls.length, 0, "uploads are batched, not sent per call");
+    await flushUsageUploads();
     assert.equal(calls.length, 1);
 
     const payload = JSON.parse(calls[0].init.body);
@@ -127,6 +130,7 @@ test("Router uploads usage records after successful route()", async () => {
     assert.equal(payload.records[0].cost_usd, 0.55);
   } finally {
     globalThis.fetch = savedFetch;
+    sdk?.configure(null);
   }
 });
 
