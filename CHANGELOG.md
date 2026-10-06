@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.10 — 2026-10-06
+
+### Usage upload
+
+- **Uploads are batched** — every routed call and every gateway request used to send its own upload request to aistatus.cc. Records now collect in one queue per process and go out once a minute, or as soon as 100 are waiting, in batches of up to 100. A gateway now makes about one upload request a minute, plus one per further 100 calls, instead of one per LLM call. The flush timer never keeps a process alive.
+- **Failed batches are retried without double counting** — each batch carries a `batch_id`. A network error, timeout, 429 or 5xx keeps the batch and resends it unchanged on the next flush, so the server can recognise a batch it already stored; any other 4xx drops it. While the server is unreachable at most 1000 records are buffered, and the oldest are dropped first.
+- **Queued records are delivered on exit** — short-lived scripts flush the queue when the event loop empties, and the gateway spends up to 3 s flushing on SIGTERM/SIGINT before it exits. A program that ends with `process.exit()` should `await flushUsageUploads()` first.
+- **New `flushUsageUploads(timeoutMs = 5000)` export** — sends everything buffered and resolves when done or when the timeout passes. `UsageUploader#flush()` does the same for a single upload URL.
+
 ## 0.0.9 — 2026-09-14
 
 ### Usage
