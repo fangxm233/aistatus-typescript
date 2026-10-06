@@ -116,11 +116,12 @@ test("Router uploads usage records after successful route()", async () => {
 
     const result = await router.route("hello", { model: "claude-sonnet-4-6" });
     assert.equal(result.content, "ok");
-    assert.equal(calls.length, 0, "uploads are batched, not sent per call");
+    const uploads = () => calls.filter(call => String(call.input) === "https://aistatus.cc/api/usage/upload");
+    assert.equal(uploads().length, 0, "uploads are batched, not sent per call");
     await flushUsageUploads();
-    assert.equal(calls.length, 1);
+    assert.equal(uploads().length, 1);
 
-    const payload = JSON.parse(calls[0].init.body);
+    const payload = JSON.parse(uploads()[0].init.body);
     assert.equal(payload.records[0].provider, "anthropic");
     assert.equal(payload.records[0].model, "anthropic/claude-sonnet-4-6");
     assert.equal(payload.records[0].input_tokens, 11);

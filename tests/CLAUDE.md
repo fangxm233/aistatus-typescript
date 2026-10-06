@@ -5,6 +5,7 @@ SDK 回归测试目录，覆盖 config、gateway server、usage、router、healt
 
 | filename | role | function |
 |---|---|---|
+| `setup.mjs` | test preload | Loaded by `npm test` via `--import`; forces `AISTATUS_UPLOAD_ENABLED=0` so local upload config never sends test records to aistatus.cc |
 | `config.test.mjs` | 测试 | 验证网关配置解析、默认值与持久化 |
 | `server.test.mjs` | integration test | Exercise endpoints, quota snapshots, SSE, and accounting |
 | `body-limit.test.mjs` | 测试 | 验证请求体默认与自定义限额 |
