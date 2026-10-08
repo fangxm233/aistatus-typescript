@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.11 — 2026-10-07
+
+### Gateway
+
+- **Usage-upload settings reload without a restart** — the gateway read `~/.aistatus/config.yaml` once at startup, so turning leaderboard uploads on or off, or changing the name, organization or email, only took effect after a restart that cut off in-flight requests. The gateway now watches that file next to its own config and applies `uploadEnabled`, `name`, `org` and `email` to the next recorded request. Records already queued are still sent under the identity they were recorded with. `AISTATUS_*` environment variables still take precedence over the file, deleting the file falls back to the defaults (uploads off), and a file that fails to parse is ignored with a warning. `watchConfig: false` turns off hot reload for both files.
+- **`startGateway()` resolves with the running `GatewayServer`** — embedders get a handle on the server; it also exposes `reloadUploadConfig()` and its `uploader`. New `watchUploadConfigFile()` export, `UsageUploader#setConfig()` and `UsageUploader#enabled`.
+
 ## 0.0.10 — 2026-10-06
 
 ### Usage upload
