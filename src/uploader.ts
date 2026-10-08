@@ -1,4 +1,4 @@
-// input: persistent upload config snapshot, per-request usage records, global fetch, and package VERSION metadata
+// input: persistent upload config (replaceable via setConfig), per-request usage records, global fetch, and package VERSION metadata
 // output: UsageUploader plus flushUsageUploads(); one process-wide batched queue per upload URL, flushed every 60 s, at 100 records, on beforeExit, or on demand
 // pos: bridges local usage tracking to remote leaderboard ingestion without blocking SDK request flows
 // >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
@@ -217,7 +217,7 @@ export async function flushUsageUploads(timeoutMs = DEFAULT_FLUSH_TIMEOUT_MS): P
 }
 
 export class UsageUploader {
-  private readonly config: AIStatusConfig;
+  private config: AIStatusConfig;
   private readonly url: string;
 
   constructor(config: AIStatusConfig, baseUrl = BASE_URL) {
@@ -225,8 +225,21 @@ export class UsageUploader {
     this.url = joinUrl(baseUrl, "/api/usage/upload");
   }
 
+  /**
+   * Replace the upload config used for subsequent records. Records already
+   * queued keep the identity they were built with and are still sent.
+   */
+  setConfig(config: AIStatusConfig): void {
+    this.config = config;
+  }
+
+  /** True when the config allows uploading: `uploadEnabled` with a name and an email. */
+  get enabled(): boolean {
+    return Boolean(this.config.uploadEnabled && this.config.name && this.config.email);
+  }
+
   upload(record: UsageRecord): void {
-    if (!this.shouldUpload()) {
+    if (!this.enabled) {
       return;
     }
     try {
@@ -242,10 +255,6 @@ export class UsageUploader {
     if (queue) {
       await withTimeout(queue.flushAll(), timeoutMs);
     }
-  }
-
-  private shouldUpload(): boolean {
-    return Boolean(this.config.uploadEnabled && this.config.name && this.config.email);
   }
 
   private buildRecord(record: UsageRecord): UsageUploadRecord {

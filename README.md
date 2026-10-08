@@ -389,6 +389,14 @@ ChatGPT Codex backend does, and PI prefers it — and the gateway tunnels those
 connections while still recording their token usage. Set it to `false` to
 refuse upgrades; clients that speak both transports fall back to SSE.
 
+The gateway also watches the usage-upload settings in `~/.aistatus/config.yaml`
+(`uploadEnabled`, `name`, `org`, `email`). Creating, editing or deleting that
+file takes effect for the next recorded request without a restart; records
+already queued are still sent under the identity they were recorded with.
+`AISTATUS_*` environment variables keep precedence over the file, and a file
+that fails to parse is ignored with a warning. `watchConfig: false` in
+`startGateway()` turns off hot reload for both files.
+
 ### How the Gateway Routes Requests
 
 When a request arrives at `/{endpoint}/{path}`:
@@ -522,6 +530,8 @@ import { startGateway } from "aistatus/gateway";
 
 await startGateway({ configPath: "./gateway.yaml" });
 ```
+
+`startGateway()` resolves with the running `GatewayServer` once it is listening.
 
 ## Environment Variables
 

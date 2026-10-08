@@ -5,10 +5,10 @@ Gateway 子模块：解析配置、维护健康状态，并暴露 proxy/status/u
 
 | filename | role | function |
 |---|---|---|
-| `index.ts` | 入口 | 导出网关 API 并启动或热加载配置 |
+| `index.ts` | 入口 | 导出网关 API 并启动网关（返回运行中的 server）；轮询热加载网关配置与 `~/.aistatus/config.yaml` 上传配置（`watchConfig: false` 时全部关闭） |
 | `auth.ts` | auth checker | Pure-function gateway API key authentication (Bearer/custom header, public path bypass) |
 | `config.ts` | 配置 | 解析网关配置、请求限额与模式 |
-| `server.ts` | HTTP runtime | Dispatch proxy requests and WebSocket upgrades, coordinate Gateway modules, and flush queued usage uploads on SIGTERM/SIGINT |
+| `server.ts` | HTTP runtime | Dispatch proxy requests and WebSocket upgrades, coordinate Gateway modules, hot-swap the upload config (`reloadUploadConfig()`), and flush queued usage uploads on SIGTERM/SIGINT |
 | `server-types.ts` | types | Define internal backend and usage contracts |
 | `server-helpers.ts` | 工具 | 转换请求头、请求体、模型与用量（含 Responses API 的 cached-input 归一化），并解析 proxy 路由 |
 | `server-info.ts` | info API | Serve health, status, usage (with multi-key `group_by`), quota, and model prechecks |

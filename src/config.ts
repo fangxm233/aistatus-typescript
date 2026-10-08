@@ -1,5 +1,5 @@
 // input: process env plus optional ~/.aistatus/config.yaml filesystem state and runtime configure() overrides
-// output: public AIStatusConfig helpers for loading, saving, and resolving persistent SDK upload settings
+// output: public AIStatusConfig helpers for loading, saving, and resolving persistent SDK upload settings, plus the CONFIG_FILE path
 // pos: SDK-level persistent configuration layer that merges in-memory overrides, env vars, YAML file values, and defaults
 // >>> 一旦我被更新，务必更新我的开头注释，以及所属文件夹的 CLAUDE.md <<<
 
@@ -22,7 +22,7 @@ interface ConfigOptions {
 }
 
 const CONFIG_DIR = path.join(os.homedir(), ".aistatus");
-const CONFIG_FILE = path.join(CONFIG_DIR, "config.yaml");
+export const CONFIG_FILE = path.join(CONFIG_DIR, "config.yaml");
 const DEFAULT_CONFIG: AIStatusConfig = {
   name: null,
   org: null,

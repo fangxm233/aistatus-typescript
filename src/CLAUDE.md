@@ -19,7 +19,7 @@ TypeScript SDK 源码目录，包含主 SDK 导出、gateway 配置/服务与共
 | `usage.ts` | shared library | Persist usage records and expose indexed reports, grouped by one or more keys |
 | `usage-index.ts` | aggregation | Incrementally index JSONL files for usage summaries; group by any combination of model/provider/billing_mode |
 | `pricing.ts` | cost calculator | Calculate costs from cached pricing or an awaited deduplicated refresh |
-| `config.ts` | SDK config layer | Persistent upload config helpers with configure/env/file/default precedence and YAML file I/O at `~/.aistatus/config.yaml` |
-| `uploader.ts` | upload bridge | Queue usage records in one process-wide batch queue per upload URL; flush every 60 s, at 100 records, on `beforeExit`, or via `flushUsageUploads()`; retry failed batches with a stable `batch_id`, cap the buffer at 1000 records |
+| `config.ts` | SDK config layer | Persistent upload config helpers with configure/env/file/default precedence and YAML file I/O at `~/.aistatus/config.yaml` (`CONFIG_FILE`) |
+| `uploader.ts` | upload bridge | Gate uploads on a replaceable config (`setConfig()`, `enabled`); queue usage records in one process-wide batch queue per upload URL; flush every 60 s, at 100 records, on `beforeExit`, or via `flushUsageUploads()`; retry failed batches with a stable `batch_id`, cap the buffer at 1000 records |
 | `providers/` | adapter layer | ProviderAdapter base class + Anthropic, OpenAI, Google, OpenRouter, Compatible adapters |
 | `gateway/` | gateway module | Gateway routing, health, quota snapshots, and translation exports |

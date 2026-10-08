@@ -1,4 +1,4 @@
-// input:  GatewayConfig, HTTP requests, provider responses
+// input:  GatewayConfig, upload config (hot-swappable), HTTP requests, provider responses
 // output: Proxy responses plus persisted usage and quota snapshots; flushes queued usage uploads on shutdown
 // pos:    Gateway HTTP routing, accounting and quota runtime
 // >>> 一旦我被更新，务必更新我的开头注释与所属文件夹 CLAUDE.md <<<
@@ -16,7 +16,7 @@ import { anthropicRequestToOpenai, openaiResponseToAnthropic } from "./translate
 import { UsageTracker } from "../usage.js";
 import { CostCalculator } from "../pricing.js";
 import { QuotaSnapshotStore } from "./quota-snapshot.js";
-import { getConfig } from "../config.js";
+import { type AIStatusConfig, getConfig } from "../config.js";
 import { UsageUploader, flushUsageUploads } from "../uploader.js";
 import {
   buildUpstreamHeaders,
@@ -59,6 +59,7 @@ export class GatewayServer {
   config: GatewayConfig;
   health: HealthTracker;
   usage: UsageTracker;
+  uploader: UsageUploader;
   quota: QuotaSnapshotStore;
   pricing: CostCalculator;
   private _keyIdx: Record<string, number> = {};
@@ -79,7 +80,8 @@ export class GatewayServer {
 
     this.config = config;
     this.health = new HealthTracker();
-    this.usage = new UsageTracker(undefined, new UsageUploader(getConfig()));
+    this.uploader = new UsageUploader(getConfig());
+    this.usage = new UsageTracker(undefined, this.uploader);
     this.quota = new QuotaSnapshotStore();
     this.pricing = new CostCalculator();
     this._pidFile = pidFile ?? null;
@@ -120,6 +122,12 @@ export class GatewayServer {
     void applyGlobalModelHealthPrecheck(this.config, this.health).catch(err => {
       console.warn("[gateway] post-reload health precheck failed:", err);
     });
+  }
+
+  /** Apply a changed upload config (~/.aistatus/config.yaml) to subsequent usage records. */
+  reloadUploadConfig(config: AIStatusConfig): void {
+    this.uploader.setConfig(config);
+    console.log(`[gateway] Upload config reloaded (usage upload ${this.uploader.enabled ? "enabled" : "disabled"})`);
   }
 
   async run(): Promise<void> {
