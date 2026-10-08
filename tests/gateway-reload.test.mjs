@@ -200,6 +200,8 @@ test("upload config hot reload: enable, identity change, parse error, disable, d
     next => { reloads.push(next); server.reloadUploadConfig(next); },
     { filePath: file, intervalMs: 20, env: { AISTATUS_ORG: "Env Org" } },
   );
+  // fs.watchFile takes its baseline stat asynchronously; a write before that is never reported.
+  await new Promise(resolve => setTimeout(resolve, 100));
   const writeAndWait = async (content) => {
     const seen = reloads.length;
     if (content === null) fs.rmSync(file);
@@ -286,6 +288,8 @@ test("startGateway watches ~/.aistatus/config.yaml unless watchConfig is false",
     const live = await startGateway({ configPath: gatewayYaml, port: 0 });
     record(live, 1);
     await flushUsageUploads();
+    // Let fs.watchFile take its baseline stat before the first write.
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     fs.writeFileSync(userConfig, "name: Alice\\nemail: alice@example.com\\nuploadEnabled: true\\n");
     await waitFor(() => live.uploader.enabled, "enable");
